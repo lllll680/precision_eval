@@ -289,7 +289,7 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
                     'total_calls': file_total_calls,
                     'valid_calls': file_valid_calls,
                     'invalid_calls': file_total_calls - file_valid_calls,
-                    'invalid_calls_details': file_invalid_details
+                    'calls_details': file_invalid_details
                 })
             
             except Exception as e:
@@ -334,9 +334,9 @@ def print_results(result: Dict):
         print(f"  非法调用数: {file_result['invalid_calls']}")
         print(f"  Acc_schema: {file_result['Acc_schema']:.4f} ({file_result['Acc_schema']*100:.2f}%)")
         
-        if file_result['invalid_calls_details']:
+        if file_result['calls_details']:
             print(f"  非法调用详情:")
-            for detail in file_result['invalid_calls_details']:
+            for detail in file_result['calls_details']:
                 print(f"    - 工具: {detail['tool_name']}")
                 if 'reason' in detail:
                     print(f"      原因: {detail['reason']}")
