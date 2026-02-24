@@ -7,6 +7,54 @@ from typing import Dict, List, Set, Tuple, Any, Optional
 from jsonschema import validate, ValidationError, Draft7Validator
 
 
+def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
+    """
+    提取从 start_pos 开始的平衡花括号内容
+    
+    Args:
+        text: 要搜索的文本
+        start_pos: 开始位置
+        
+    Returns:
+        平衡的花括号内容（包含外层花括号），如果没有找到则返回 None
+    """
+    # 找到第一个 '{'
+    brace_start = text.find('{', start_pos)
+    if brace_start == -1:
+        return None
+    
+    count = 0
+    in_string = False
+    escape_next = False
+    
+    for i in range(brace_start, len(text)):
+        c = text[i]
+        
+        # 处理转义字符
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if c == '\\':
+            escape_next = True
+            continue
+        
+        # 处理字符串边界（简化处理，只考虑双引号和单引号）
+        if c in ('"', "'") and not in_string:
+            in_string = c
+        elif c == in_string:
+            in_string = False
+        elif not in_string:
+            if c == '{':
+                count += 1
+            elif c == '}':
+                count -= 1
+                if count == 0:
+                    return text[brace_start:i+1]
+    
+    return None
+
+
 def complete_output_schema(raw_schema: Dict) -> Dict:
     """
     补全不完整的Output schema为标准JSON Schema格式
@@ -72,40 +120,40 @@ def parse_tool_schema(tool_schema_path: str) -> Dict[str, Dict]:
             continue
         tool_name = name_match.group(1)
         
-        # 提取Parameters (输入schema)
-        params_match = re.search(r'Parameters:\s*(\{.+?\})\s*(?=\n|Output:|$)', block, re.DOTALL)
+        # 提取Parameters (输入schema) - 使用平衡括号匹配
         input_schema = None
-        if params_match:
-            try:
-                # 使用ast.literal_eval来安全解析Python字典字符串
-                params_str = params_match.group(1)
-                # 处理None值
-                params_str = params_str.replace('None', 'null')
-                input_schema = json.loads(params_str.replace("'", '"'))
-            except Exception as e:
-                print(f"警告: 解析工具 {tool_name} 的Parameters失败: {e}")
+        params_pos = block.find('Parameters:')
+        if params_pos != -1:
+            params_str = extract_balanced_braces(block, params_pos)
+            if params_str:
                 try:
-                    # 尝试使用ast.literal_eval
-                    input_schema = ast.literal_eval(params_match.group(1))
-                except:
-                    pass
+                    # 处理None值并解析
+                    params_str_clean = params_str.replace('None', 'null')
+                    input_schema = json.loads(params_str_clean.replace("'", '"'))
+                except Exception as e:
+                    print(f"警告: 解析工具 {tool_name} 的Parameters失败 (JSON): {e}")
+                    try:
+                        input_schema = ast.literal_eval(params_str)
+                    except Exception as e2:
+                        print(f"警告: 解析工具 {tool_name} 的Parameters失败 (AST): {e2}")
         
-        # 提取Output (输出schema)
-        output_match = re.search(r'Output:\s*(\{.+?\})\s*(?=\n\n|\n\d+\.|\Z)', block, re.DOTALL)
+        # 提取Output (输出schema) - 使用平衡括号匹配
         output_schema = None
-        if output_match:
-            try:
-                output_str = output_match.group(1)
-                # 处理None值
-                output_str = output_str.replace('None', 'null')
-                output_schema = json.loads(output_str.replace("'", '"'))
-            except Exception as e:
-                print(f"警告: 解析工具 {tool_name} 的Output失败: {e}")
+        output_pos = block.find('Output:')
+        if output_pos != -1:
+            output_str = extract_balanced_braces(block, output_pos)
+            if output_str:
                 try:
-                    # 尝试使用ast.literal_eval
-                    output_schema = ast.literal_eval(output_match.group(1))
-                except:
-                    pass
+                    output_str_clean = output_str.replace('None', 'null')
+                    output_schema = json.loads(output_str_clean.replace("'", '"'))
+                except Exception as e:
+                    print(f"警告: 解析工具 {tool_name} 的Output失败 (JSON): {e}")
+                    try:
+                        output_schema = ast.literal_eval(output_str)
+                    except Exception as e2:
+                        print(f"警告: 解析工具 {tool_name} 的Output失败 (AST): {e2}")
+            else:
+                print(f"警告: 工具 {tool_name} 的Output未找到有效的花括号内容")
         
         # 补全output_schema为标准JSON Schema格式
         output_schema = complete_output_schema(output_schema)
@@ -130,7 +178,7 @@ def validate_against_schema(data: Any, schema: Dict) -> Tuple[bool, Optional[str
         (是否合法, 错误信息)
     """
     if schema is None:
-        return True, None
+        return False, "Schema未定义或解析失败"
     
     try:
         # 创建验证器
