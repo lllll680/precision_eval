@@ -6,6 +6,53 @@ from typing import Dict, List, Set, Tuple, Any, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
+def extract_first_json_object(text: str) -> Optional[str]:
+    """
+    从文本中提取第一个完整的JSON对象（使用平衡括号匹配）
+    
+    Args:
+        text: 包含JSON的文本
+        
+    Returns:
+        第一个完整的JSON对象字符串，如果没有找到则返回 None
+    """
+    # 找到第一个 '{'
+    brace_start = text.find('{')
+    if brace_start == -1:
+        return None
+    
+    count = 0
+    in_string = False
+    escape_next = False
+    
+    for i in range(brace_start, len(text)):
+        c = text[i]
+        
+        # 处理转义字符
+        if escape_next:
+            escape_next = False
+            continue
+        
+        if c == '\\':
+            escape_next = True
+            continue
+        
+        # 处理字符串边界
+        if c == '"' and not in_string:
+            in_string = True
+        elif c == '"' and in_string:
+            in_string = False
+        elif not in_string:
+            if c == '{':
+                count += 1
+            elif c == '}':
+                count -= 1
+                if count == 0:
+                    return text[brace_start:i+1]
+    
+    return None
+
+
 def extract_entities_from_query(query: str, model, tokenizer) -> Dict[str, List[str]]:
     """
     使用Qwen模型从query中提取结构化实体
@@ -61,20 +108,25 @@ def extract_entities_from_query(query: str, model, tokenizer) -> Dict[str, List[
     
     # 解析JSON响应
     try:
-        # 尝试提取JSON部分
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
-        if json_match:
-            entities = json.loads(json_match.group())
+        # 先清理响应中的思考标签（如 <think>...</think> 或 <thinke>...</thinke>）
+        cleaned_response = re.sub(r'<think[^>]*>.*?</think[^>]*>', '', response, flags=re.DOTALL)
+        cleaned_response = cleaned_response.strip()
+        
+        # 尝试提取第一个完整的JSON对象（使用平衡括号匹配）
+        json_str = extract_first_json_object(cleaned_response)
+        
+        if json_str:
+            entities = json.loads(json_str)
             # 确保所有值都是列表
             for key in entities:
                 if not isinstance(entities[key], list):
                     entities[key] = [entities[key]]
             return entities
         else:
-            print(f"警告: 无法从模型响应中提取JSON: {response}")
+            print(f"警告: 无法从模型响应中提取JSON: {response[:200]}")
             return {}
     except Exception as e:
-        print(f"警告: 解析实体JSON失败: {e}, 响应: {response}")
+        print(f"警告: 解析实体JSON失败: {e}, 响应: {response[:200]}")
         return {}
 
 
