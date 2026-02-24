@@ -78,7 +78,7 @@ def extract_entities_from_query(query: str, model, tokenizer) -> Dict[str, List[
         return {}
 
 
-def check_param_match(args: Dict, entities: Dict[str, List[str]]) -> Tuple[int, int, List[Dict]]:
+def check_param_match(args: Dict, entities: Dict[str, List[str]]) -> Tuple[int, int, List[Dict], List[str], List[str]]:
     """
     检查args中的参数值是否与query中提取的实体匹配
     
@@ -92,11 +92,13 @@ def check_param_match(args: Dict, entities: Dict[str, List[str]]) -> Tuple[int, 
         entities: 从query中提取的实体
         
     Returns:
-        (正确匹配数, 需要检查的参数总数, 不匹配的详情列表)
+        (正确匹配数, 需要检查的参数总数, 不匹配的详情列表, 被检查的参数名列表, 正确的参数名列表)
     """
     correct_count = 0
     total_count = 0
     mismatch_details = []
+    checked_params = []  # 被检查的参数名列表
+    correct_params_list = []  # 正确的参数名列表
     
     # 定义参数名到期望实体类型的映射
     param_to_entity_mapping = {
@@ -141,15 +143,18 @@ def check_param_match(args: Dict, entities: Dict[str, List[str]]) -> Tuple[int, 
                     'reason': f'跨类型误用：参数期望{expected_entity_type}，但值来自query中的{actual_type}'
                 })
                 total_count += 1  # 跨类型误用也计入统计
+                checked_params.append(param_name)  # 记录被检查的参数
             # 否则：query中无该类型实体，且值也不来自query，不计入统计
             continue
         
         # query中有该类型实体，计入统计
         total_count += 1
+        checked_params.append(param_name)  # 记录被检查的参数
         
         # 检查参数值是否在期望的实体列表中
         if param_value in entities[expected_entity_type]:
             correct_count += 1
+            correct_params_list.append(param_name)  # 记录正确的参数
         else:
             # 检查是否是跨类型误用
             if param_value in all_entity_values:
@@ -174,7 +179,7 @@ def check_param_match(args: Dict, entities: Dict[str, List[str]]) -> Tuple[int, 
                     'reason': f'参数值与query中的{expected_entity_type}不一致'
                 })
     
-    return correct_count, total_count, mismatch_details
+    return correct_count, total_count, mismatch_details, checked_params, correct_params_list
 
 
 def load_schema_validation_results(schema_result_path: str) -> Dict[str, Dict[str, Any]]:
@@ -202,7 +207,7 @@ def load_schema_validation_results(schema_result_path: str) -> Dict[str, Dict[st
             # 统计每个文件中哪些工具的action验证失败
             # 只基于action_valid判断，不涉及observation
             action_invalid_tools = set()
-            for detail in file_result.get('invalid_calls_details', []):
+            for detail in file_result.get('calls_details', []):
                 tool_name = detail.get('tool_name', '')
                 action_valid = detail.get('action_valid', True)
                 if not action_valid:
@@ -305,19 +310,31 @@ def calculate_query_param_accuracy(data_folders: List[str], model_path: str,
                 print(f"    提取的实体: {entities}")
                 
                 # 检查response中的所有action参数
+                per_step_details = []  # 记录每个step的检查详情
+                
                 if 'response' in data:
                     for step_dict in data['response']:
                         for step_key, step_value in step_dict.items():
                             if 'coa' in step_value:
                                 coa_list = step_value['coa']
-                                for coa_item in coa_list:
+                                for coa_idx, coa_item in enumerate(coa_list):
                                     if 'action' in coa_item:
                                         action = coa_item['action']
                                         tool_name = action.get('name', '')
                                         args = action.get('args', {})
                                         
-                                        # 检查参数匹配
-                                        correct, total, mismatches = check_param_match(args, entities)
+                                        # 检查参数匹配（新增返回 checked_params 和 correct_params_list）
+                                        correct, total, mismatches, checked_params, correct_params_list = check_param_match(args, entities)
+                                        
+                                        # 记录该步骤的检查详情
+                                        step_detail = {
+                                            'step': step_key,
+                                            'coa_index': coa_idx,
+                                            'tool_name': tool_name,
+                                            'checked_params': checked_params,
+                                            'correct_params': correct_params_list
+                                        }
+                                        per_step_details.append(step_detail)
                                         
                                         # 独立指标统计（所有calls）
                                         file_total_params += total
@@ -365,6 +382,7 @@ def calculate_query_param_accuracy(data_folders: List[str], model_path: str,
                     'total_params': file_total_params,
                     'correct_params': file_correct_params,
                     'incorrect_params': file_total_params - file_correct_params,
+                    'per_step_details': per_step_details,  # 新增：每个step的检查详情
                     'mismatch_details': file_mismatch_details
                 }
                 
