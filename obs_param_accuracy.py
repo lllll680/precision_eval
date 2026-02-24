@@ -346,7 +346,8 @@ def load_schema_validation_results(schema_result_path: str) -> Dict[str, Dict[st
 def calculate_obs_param_accuracy(
     data_folders: List[str],
     query_result_path: str,
-    schema_result_path: Optional[str] = None
+    schema_result_path: Optional[str] = None,
+    exclude_last_steps: int = 0
 ) -> Dict:
     """
     计算历史 Observation 参数引用正确率
@@ -355,6 +356,7 @@ def calculate_obs_param_accuracy(
         data_folders: 数据文件夹路径列表
         query_result_path: query_param_accuracy_result.json 路径
         schema_result_path: schema 验证结果路径（可选，用于联合指标）
+        exclude_last_steps: 排除最后 N 个 steps（默认 0 不排除，设为 2 排除最后两个总结 step）
         
     Returns:
         包含统计结果的字典
@@ -420,6 +422,13 @@ def calculate_obs_param_accuracy(
                 
                 response = data.get('response', [])
                 
+                # 计算需要处理的 steps 数量（排除最后 N 个）
+                total_steps = len(response)
+                steps_to_process = max(0, total_steps - exclude_last_steps)
+                
+                if exclude_last_steps > 0 and total_steps > steps_to_process:
+                    print(f"    排除最后 {exclude_last_steps} 个 steps（共 {total_steps} 个，处理前 {steps_to_process} 个）")
+                
                 # 文件级统计
                 file_total_params = 0
                 file_correct_params = 0
@@ -432,8 +441,8 @@ def calculate_obs_param_accuracy(
                 # 获取该文件的 schema 验证信息
                 file_schema_info = schema_valid_map.get(file_path_str, {})
                 
-                # 遍历每个 step（response 是列表）
-                for step_index, step_item in enumerate(response):
+                # 遍历每个 step（response 是列表），排除最后 N 个
+                for step_index, step_item in enumerate(response[:steps_to_process]):
                     # step_item 格式: {"stepN": {"cot": ..., "coa": [...]}}
                     for step_key, step_data in step_item.items():
                         if not step_key.startswith('step'):
@@ -665,8 +674,11 @@ if __name__ == "__main__":
     # Schema验证结果路径（用于联合指标）
     schema_result_path = "/mnt/data/kw/ly/precision_index/schema_validation_accuracy_result.json"
     
+    # 排除最后 N 个 steps（设为 2 排除最后两个总结 step，设为 0 不排除）
+    exclude_last_steps = 2
+    
     # 计算Observation参数引用正确率
-    result = calculate_obs_param_accuracy(data_folders, query_result_path, schema_result_path)
+    result = calculate_obs_param_accuracy(data_folders, query_result_path, schema_result_path, exclude_last_steps)
     
     # 打印结果
     print_results(result)
