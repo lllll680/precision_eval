@@ -263,21 +263,22 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
                         # 验证observation
                         obs_valid, obs_error = validate_against_schema(observation, output_schema)
                         
+                        # 构建调用详情（无论是否合法都记录）
+                        call_info = {
+                            'tool_name': tool_name,
+                            'action_valid': args_valid,
+                            'observation_valid': obs_valid
+                        }
+                        if not args_valid:
+                            call_info['action_error'] = args_error
+                        if not obs_valid:
+                            call_info['observation_error'] = obs_error
+                        file_invalid_details.append(call_info)
+                        
                         # 只有args和observation都合法才算合法
                         if args_valid and obs_valid:
                             file_valid_calls += 1
                             valid_calls += 1
-                        else:
-                            error_info = {
-                                'tool_name': tool_name,
-                                'action_valid': args_valid,
-                                'observation_valid': obs_valid
-                            }
-                            if not args_valid:
-                                error_info['action_error'] = args_error
-                            if not obs_valid:
-                                error_info['observation_error'] = obs_error
-                            file_invalid_details.append(error_info)
                 
                 # 计算该文件的准确率
                 file_accuracy = file_valid_calls / file_total_calls if file_total_calls > 0 else 0.0
@@ -335,16 +336,18 @@ def print_results(result: Dict):
         print(f"  Acc_schema: {file_result['Acc_schema']:.4f} ({file_result['Acc_schema']*100:.2f}%)")
         
         if file_result['calls_details']:
-            print(f"  非法调用详情:")
+            print(f"  调用详情:")
             for detail in file_result['calls_details']:
-                print(f"    - 工具: {detail['tool_name']}")
+                action_status = "✓" if detail.get('action_valid', False) else "✗"
+                obs_status = "✓" if detail.get('observation_valid', False) else "✗"
+                print(f"    - 工具: {detail['tool_name']} [Action:{action_status}, Obs:{obs_status}]")
                 if 'reason' in detail:
                     print(f"      原因: {detail['reason']}")
                 else:
                     if not detail['action_valid']:
-                        print(f"      Action验证失败: {detail.get('action_error', 'Unknown error')}")
+                        print(f"      Action错误: {detail.get('action_error', 'Unknown error')}")
                     if not detail['observation_valid']:
-                        print(f"      Observation验证失败: {detail.get('observation_error', 'Unknown error')}")
+                        print(f"      Observation错误: {detail.get('observation_error', 'Unknown error')}")
     
     # 打印总体结果
     print("\n" + "="*60)
