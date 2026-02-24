@@ -396,6 +396,10 @@ def calculate_obs_param_accuracy(
         print(f"\n处理数据文件夹: {folder}")
         
         for json_file in sorted(folder_path.glob("*.json")):
+            # 跳过特殊文件
+            if json_file.name in ['question_info.json', 'batch_summary.json']:
+                continue
+            
             file_path_str = str(json_file)
             
             # 获取该文件的 query 实体提取结果
