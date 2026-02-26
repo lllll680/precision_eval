@@ -6,29 +6,29 @@ from typing import Dict, List, Set, Tuple, Any, Optional
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-def extract_first_json_object(text: str) -> Optional[str]:
+def extract_balanced_json(text: str, start_char: str = '{', end_char: str = '}') -> Optional[str]:
     """
-    从文本中提取第一个完整的JSON对象（使用平衡括号匹配）
+    从文本中提取第一个平衡的JSON结构（对象或数组）
     
     Args:
         text: 包含JSON的文本
+        start_char: 起始字符，'{' 或 '['
+        end_char: 结束字符，'}' 或 ']'
         
     Returns:
-        第一个完整的JSON对象字符串，如果没有找到则返回 None
+        第一个完整的JSON字符串，如果没有找到则返回 None
     """
-    # 找到第一个 '{'
-    brace_start = text.find('{')
-    if brace_start == -1:
+    start_pos = text.find(start_char)
+    if start_pos == -1:
         return None
     
     count = 0
     in_string = False
     escape_next = False
     
-    for i in range(brace_start, len(text)):
+    for i in range(start_pos, len(text)):
         c = text[i]
         
-        # 处理转义字符
         if escape_next:
             escape_next = False
             continue
@@ -37,25 +37,106 @@ def extract_first_json_object(text: str) -> Optional[str]:
             escape_next = True
             continue
         
-        # 处理字符串边界
         if c == '"' and not in_string:
             in_string = True
         elif c == '"' and in_string:
             in_string = False
         elif not in_string:
-            if c == '{':
+            if c == start_char:
                 count += 1
-            elif c == '}':
+            elif c == end_char:
                 count -= 1
                 if count == 0:
-                    return text[brace_start:i+1]
+                    return text[start_pos:i+1]
     
     return None
 
 
-def extract_entities_from_query(query: str, model, tokenizer) -> Dict[str, List[str]]:
+def extract_json_robust(text: str) -> Optional[Any]:
     """
-    使用Qwen模型从query中提取结构化实体
+    健壮的JSON提取，支持多种情况：
+    1. 直接输出JSON
+    2. 包含<think>...</think>标签
+    3. 包含未闭合的<think>标签
+    4. JSON对象或数组
+    
+    Args:
+        text: 模型输出的文本
+        
+    Returns:
+        解析后的JSON对象，如果失败则返回 None
+    """
+    if not text or not text.strip():
+        return None
+    
+    # 策略1: 直接尝试解析
+    try:
+        return json.loads(text.strip())
+    except:
+        pass
+    
+    # 策略2: 清理各种 think 标签模式
+    cleaned = text
+    
+    # 模式1: <think>...</think> 或 <thinking>...</thinking> (有闭合标签)
+    cleaned = re.sub(r'<think[^>]*>.*?</think[^>]*>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r'<thinking[^>]*>.*?</thinking[^>]*>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+    
+    # 模式2: <think>... 无闭合标签（截取到第一个JSON开始位置）
+    think_match = re.search(r'<think[^>]*>', cleaned, re.IGNORECASE)
+    if think_match:
+        # 找到JSON开始位置
+        json_start = -1
+        for char in ['{', '[']:
+            pos = cleaned.find(char, think_match.end())
+            if pos != -1 and (json_start == -1 or pos < json_start):
+                json_start = pos
+        
+        if json_start != -1:
+            cleaned = cleaned[json_start:]
+        else:
+            # 没有找到JSON，尝试删除think标签到末尾
+            cleaned = cleaned[:think_match.start()]
+    
+    cleaned = cleaned.strip()
+    
+    # 策略3: 尝试提取JSON对象
+    json_str = extract_balanced_json(cleaned, '{', '}')
+    if json_str:
+        try:
+            return json.loads(json_str)
+        except:
+            pass
+    
+    # 策略4: 尝试提取JSON数组
+    json_str = extract_balanced_json(cleaned, '[', ']')
+    if json_str:
+        try:
+            return json.loads(json_str)
+        except:
+            pass
+    
+    # 策略5: 尝试从原文本直接提取（跳过think标签前的内容）
+    json_str = extract_balanced_json(text, '{', '}')
+    if json_str:
+        try:
+            return json.loads(json_str)
+        except:
+            pass
+    
+    json_str = extract_balanced_json(text, '[', ']')
+    if json_str:
+        try:
+            return json.loads(json_str)
+        except:
+            pass
+    
+    return None
+
+
+def extract_entities_from_query(query: str, model, tokenizer) -> List[str]:
+    """
+    使用Qwen模型从query中提取所有实体值（不区分类型）
     
     Args:
         query: 用户查询文本
@@ -63,24 +144,32 @@ def extract_entities_from_query(query: str, model, tokenizer) -> Dict[str, List[
         tokenizer: Qwen tokenizer
         
     Returns:
-        提取的实体字典，格式如 {"device_name": ["device1"], "interface_name": ["eth0"], "ip_address": ["192.168.1.1"]}
+        提取的实体值列表，如 ["192.168.100.2", "borderleaf01", "10GE1/0/24"]
     """
-    # 构建提示词
-    prompt = f"""请从以下网络运维查询中提取结构化实体信息。只提取明确出现的实体，不要推测。
+    # 构建prompt - 简化为提取所有实体值
+    prompt = f"""从以下网络运维查询中提取所有具体的实体值，包括：
+- IP地址（如 192.168.100.2, 10.84.21.109）
+- 设备名称（如 borderleaf01_1_16.140, serverleaf01）
+- 接口名称（如 10GE1/0/24, Eth-Trunk1）
+- VLAN ID、端口号等其他具体数值
 
 查询：{query}
 
-请以JSON格式输出提取的实体，包括以下类型（如果存在）：
-- device_name: 设备名称（如 serverleaf01_1_16.135）
-- interface_name: 接口名称（如 10GE1/0/24）
-- ip_address: IP地址（如 192.168.100.2）
-- bgp_neighbor: BGP邻居地址
-- 其他相关实体
+要求：
+1. 只提取明确出现的具体值，不要推测
+2. 输出一个简单的列表，不区分类型
+3. 只输出JSON，不要解释
 
-输出格式示例：
-{{"device_name": ["serverleaf01_1_16.135"], "interface_name": ["10GE1/0/24"]}}
+输出格式：{{"entities": ["值1", "值2", ...]}}
 
-只输出JSON，不要其他解释："""
+示例：
+查询："192.168.100.2和192.168.180.2之间网络不通"
+输出：{{"entities": ["192.168.100.2", "192.168.180.2"]}}
+
+查询："在borderleaf01_1_16.140设备上BGP邻居10.84.21.109建立失败"
+输出：{{"entities": ["borderleaf01_1_16.140", "10.84.21.109"]}}
+
+JSON输出："""
 
     # 生成回复
     messages = [{"role": "user", "content": prompt}]
@@ -106,42 +195,69 @@ def extract_entities_from_query(query: str, model, tokenizer) -> Dict[str, List[
     
     response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
     
-    # 解析JSON响应
+    # 使用健壮的JSON提取
     try:
-        # 先清理响应中的思考标签（如 <think>...</think> 或 <thinke>...</thinke>）
-        cleaned_response = re.sub(r'<think[^>]*>.*?</think[^>]*>', '', response, flags=re.DOTALL)
-        cleaned_response = cleaned_response.strip()
+        result = extract_json_robust(response)
         
-        # 尝试提取第一个完整的JSON对象（使用平衡括号匹配）
-        json_str = extract_first_json_object(cleaned_response)
-        
-        if json_str:
-            entities = json.loads(json_str)
-            # 确保所有值都是列表
-            for key in entities:
-                if not isinstance(entities[key], list):
-                    entities[key] = [entities[key]]
-            return entities
-        else:
+        if result is None:
             print(f"警告: 无法从模型响应中提取JSON: {response[:200]}")
-            return {}
+            return []
+        
+        # 支持两种格式:
+        # 1. {"entities": ["val1", "val2"]} - 新格式
+        # 2. ["val1", "val2"] - 纯数组格式
+        # 3. {"type1": ["val1"], "type2": ["val2"]} - 旧格式（兼容）
+        
+        if isinstance(result, list):
+            # 纯数组格式
+            return [str(v) for v in result]
+        elif isinstance(result, dict):
+            if 'entities' in result:
+                # 新格式
+                entities = result['entities']
+                if isinstance(entities, list):
+                    return [str(v) for v in entities]
+                else:
+                    return [str(entities)]
+            else:
+                # 旧格式 - 合并所有值
+                all_values = []
+                for key, values in result.items():
+                    if isinstance(values, list):
+                        all_values.extend([str(v) for v in values])
+                    else:
+                        all_values.append(str(values))
+                return all_values
+        else:
+            return [str(result)]
+            
     except Exception as e:
         print(f"警告: 解析实体JSON失败: {e}, 响应: {response[:200]}")
-        return {}
+        return []
 
 
-def check_param_match(args: Dict, entities: Dict[str, List[str]]) -> Tuple[int, int, List[Dict], List[str], List[str]]:
+# 需要检查的参数名列表（这些参数应该来自 Query 中的实体）
+QUERY_RELATED_PARAMS = {
+    'device_name', 'device_id', 'host_name', 'hostname',
+    'interface_name', 'interface_id', 'port_name',
+    'ip_address', 'ip', 'source_ip', 'dest_ip', 'target_ip', 'destination_ip',
+    'bgp_neighbor', 'neighbor_ip', 'peer_ip',
+    'vlan_id', 'vlan',
+}
+
+
+def check_param_match(args: Dict, entities: List[str]) -> Tuple[int, int, List[Dict], List[str], List[str]]:
     """
-    检查args中的参数值是否与query中提取的实体匹配
+    检查args中的参数值是否在query实体列表中
     
-    核心逻辑：
-    - 只有当query中存在某类型实体时，才检查对应参数是否正确引用
-    - 如果query中没有该类型实体，则该参数不计入统计（可能来自中间结果）
-    - 检测跨类型误用（如把device_name当作ip_address使用）
+    简化逻辑：
+    - 只检查特定参数名（如 device_name, ip_address 等）
+    - 参数值在 entities 列表中即为正确
+    - 不再区分实体类型，避免字段名不匹配问题
     
     Args:
         args: action中的参数
-        entities: 从query中提取的实体
+        entities: 从query中提取的实体值列表
         
     Returns:
         (正确匹配数, 需要检查的参数总数, 不匹配的详情列表, 被检查的参数名列表, 正确的参数名列表)
@@ -149,87 +265,39 @@ def check_param_match(args: Dict, entities: Dict[str, List[str]]) -> Tuple[int, 
     correct_count = 0
     total_count = 0
     mismatch_details = []
-    checked_params = []  # 被检查的参数名列表
-    correct_params_list = []  # 正确的参数名列表
+    checked_params = []
+    correct_params_list = []
     
-    # 定义参数名到期望实体类型的映射
-    param_to_entity_mapping = {
-        'device_name': 'device_name',
-        'device_id': 'device_name',
-        'host_name': 'device_name',
-        'interface_name': 'interface_name',
-        'interface_id': 'interface_name',
-        'ip_address': 'ip_address',
-        'source_ip': 'ip_address',
-        'dest_ip': 'ip_address',
-        'bgp_neighbor': 'bgp_neighbor',
-        'neighbor_ip': 'bgp_neighbor',
-    }
+    # 如果query中没有提取到实体，不进行检查
+    if not entities:
+        return 0, 0, [], [], []
     
-    # 收集所有query中的实体值，用于检测跨类型误用
-    all_entity_values = {}  # value -> entity_type
-    for entity_type, values in entities.items():
-        for v in values:
-            all_entity_values[v] = entity_type
+    # 将实体列表转换为集合，方便查找
+    entities_set = set(entities)
     
     for param_name, param_value in args.items():
-        # 检查该参数是否需要与query实体匹配
-        if param_name not in param_to_entity_mapping:
+        # 只检查特定的参数名
+        if param_name.lower() not in QUERY_RELATED_PARAMS:
             continue
         
-        expected_entity_type = param_to_entity_mapping[param_name]
+        # 将参数值转为字符串进行比较
+        param_value_str = str(param_value)
         
-        # 关键：只有当query中存在该类型实体时才计入统计
-        if expected_entity_type not in entities or not entities[expected_entity_type]:
-            # query中没有该类型实体，检查是否存在跨类型误用
-            if param_value in all_entity_values:
-                actual_type = all_entity_values[param_value]
-                # 跨类型误用：参数期望ip_address，但值来自device_name
-                mismatch_details.append({
-                    'param_name': param_name,
-                    'param_value': param_value,
-                    'expected_type': expected_entity_type,
-                    'expected_values': [],
-                    'error_type': 'cross_type_misuse',
-                    'actual_type': actual_type,
-                    'reason': f'跨类型误用：参数期望{expected_entity_type}，但值来自query中的{actual_type}'
-                })
-                total_count += 1  # 跨类型误用也计入统计
-                checked_params.append(param_name)  # 记录被检查的参数
-            # 否则：query中无该类型实体，且值也不来自query，不计入统计
-            continue
-        
-        # query中有该类型实体，计入统计
         total_count += 1
-        checked_params.append(param_name)  # 记录被检查的参数
+        checked_params.append(param_name)
         
-        # 检查参数值是否在期望的实体列表中
-        if param_value in entities[expected_entity_type]:
+        # 检查参数值是否在实体列表中
+        if param_value_str in entities_set:
             correct_count += 1
-            correct_params_list.append(param_name)  # 记录正确的参数
+            correct_params_list.append(param_name)
         else:
-            # 检查是否是跨类型误用
-            if param_value in all_entity_values:
-                actual_type = all_entity_values[param_value]
-                mismatch_details.append({
-                    'param_name': param_name,
-                    'param_value': param_value,
-                    'expected_type': expected_entity_type,
-                    'expected_values': entities[expected_entity_type],
-                    'error_type': 'cross_type_misuse',
-                    'actual_type': actual_type,
-                    'reason': f'跨类型误用：参数期望{expected_entity_type}，但值来自query中的{actual_type}'
-                })
-            else:
-                mismatch_details.append({
-                    'param_name': param_name,
-                    'param_value': param_value,
-                    'expected_type': expected_entity_type,
-                    'expected_values': entities[expected_entity_type],
-                    'error_type': 'wrong_value',
-                    'actual_type': None,
-                    'reason': f'参数值与query中的{expected_entity_type}不一致'
-                })
+            mismatch_details.append({
+                'param_name': param_name,
+                'param_value': param_value_str,
+                'query_entities': entities,
+                'error_type': 'not_in_query',
+                'reason': f'参数值不在Query实体列表中'
+            })
     
     return correct_count, total_count, mismatch_details, checked_params, correct_params_list
 
@@ -305,14 +373,10 @@ def calculate_query_param_accuracy(data_folders: List[str], model_path: str,
     # 统计变量 - 独立指标（所有calls）
     total_params = 0  # 需要检查的参数总数
     correct_params = 0  # 正确引用的参数数
-    cross_type_errors = 0  # 跨类型误用错误数
-    wrong_value_errors = 0  # 值不一致错误数
     
     # 统计变量 - 联合指标（仅schema有效的calls）
     schema_valid_total_params = 0
     schema_valid_correct_params = 0
-    schema_valid_cross_type_errors = 0
-    schema_valid_wrong_value_errors = 0
     
     per_file_results = []  # 每条数据的结果
     
@@ -410,15 +474,6 @@ def calculate_query_param_accuracy(data_folders: List[str], model_path: str,
                                                 mismatch['tool_name'] = tool_name
                                                 mismatch['step'] = step_key
                                                 mismatch['action_valid'] = is_action_valid
-                                                # 统计错误类型
-                                                if mismatch.get('error_type') == 'cross_type_misuse':
-                                                    cross_type_errors += 1
-                                                    if schema_result_path and is_action_valid:
-                                                        schema_valid_cross_type_errors += 1
-                                                elif mismatch.get('error_type') == 'wrong_value':
-                                                    wrong_value_errors += 1
-                                                    if schema_result_path and is_action_valid:
-                                                        schema_valid_wrong_value_errors += 1
                                             file_mismatch_details.extend(mismatches)
                 
                 # 计算该文件的准确率
@@ -466,11 +521,7 @@ def calculate_query_param_accuracy(data_folders: List[str], model_path: str,
             'Acc_param_query': overall_accuracy,
             'total_params': total_params,
             'correct_params': correct_params,
-            'incorrect_params': total_params - correct_params,
-            'error_breakdown': {
-                'cross_type_misuse': cross_type_errors,
-                'wrong_value': wrong_value_errors
-            }
+            'incorrect_params': total_params - correct_params
         }
     }
     
@@ -480,11 +531,7 @@ def calculate_query_param_accuracy(data_folders: List[str], model_path: str,
             'Acc_param_query_schema_valid': schema_valid_accuracy,
             'total_params': schema_valid_total_params,
             'correct_params': schema_valid_correct_params,
-            'incorrect_params': schema_valid_total_params - schema_valid_correct_params,
-            'error_breakdown': {
-                'cross_type_misuse': schema_valid_cross_type_errors,
-                'wrong_value': schema_valid_wrong_value_errors
-            }
+            'incorrect_params': schema_valid_total_params - schema_valid_correct_params
         }
     
     return result
@@ -522,18 +569,9 @@ def print_results(result: Dict):
         if file_result['mismatch_details']:
             print(f"  参数不匹配详情:")
             for detail in file_result['mismatch_details']:
-                error_type = detail.get('error_type', 'unknown')
-                error_type_cn = {
-                    'cross_type_misuse': '跨类型误用',
-                    'wrong_value': '值不一致'
-                }.get(error_type, error_type)
-                
                 print(f"    - Step: {detail['step']}, 工具: {detail['tool_name']}")
-                print(f"      错误类型: {error_type_cn}")
                 print(f"      参数名: {detail['param_name']}, 参数值: {detail['param_value']}")
-                print(f"      期望类型: {detail.get('expected_type', 'N/A')}, 期望值: {detail['expected_values']}")
-                if detail.get('actual_type'):
-                    print(f"      实际来源类型: {detail['actual_type']}")
+                print(f"      Query实体: {detail.get('query_entities', [])}")
                 print(f"      原因: {detail['reason']}")
     
     # 打印总体结果
@@ -544,13 +582,6 @@ def print_results(result: Dict):
     print(f"需检查参数总数 (N_query_param): {overall['total_params']}")
     print(f"正确引用参数数 (N_correct_query): {overall['correct_params']}")
     print(f"错误引用参数数: {overall['incorrect_params']}")
-    
-    # 打印错误类型分布
-    if 'error_breakdown' in overall:
-        breakdown = overall['error_breakdown']
-        print(f"  - 跨类型误用 (cross_type_misuse): {breakdown.get('cross_type_misuse', 0)}")
-        print(f"  - 值不一致 (wrong_value): {breakdown.get('wrong_value', 0)}")
-    
     print(f"Query参数引用正确率 (Acc_param_query): {overall['Acc_param_query']:.4f} ({overall['Acc_param_query']*100:.2f}%)")
     
     # 打印联合指标结果（仅schema有效的calls）
@@ -562,12 +593,6 @@ def print_results(result: Dict):
         print(f"需检查参数总数 (Schema有效): {schema_valid['total_params']}")
         print(f"正确引用参数数: {schema_valid['correct_params']}")
         print(f"错误引用参数数: {schema_valid['incorrect_params']}")
-        
-        if 'error_breakdown' in schema_valid:
-            breakdown = schema_valid['error_breakdown']
-            print(f"  - 跨类型误用 (cross_type_misuse): {breakdown.get('cross_type_misuse', 0)}")
-            print(f"  - 值不一致 (wrong_value): {breakdown.get('wrong_value', 0)}")
-        
         print(f"Query参数引用正确率 (Schema有效): {schema_valid['Acc_param_query_schema_valid']:.4f} ({schema_valid['Acc_param_query_schema_valid']*100:.2f}%)")
     
     print("="*60)
