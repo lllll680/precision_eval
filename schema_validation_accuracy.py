@@ -247,7 +247,9 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
     
     # 统计变量
     total_calls = 0  # 总调用数
-    valid_calls = 0  # schema合法的调用数
+    valid_calls = 0  # schema合法的调用数（action和observation都合法）
+    action_valid_calls = 0  # action参数合法的调用数
+    observation_valid_calls = 0  # observation合法的调用数
     per_file_results = []  # 每条数据的结果
     
     # 遍历所有数据文件夹
@@ -275,6 +277,8 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
                 # 针对每个文件的统计
                 file_total_calls = 0
                 file_valid_calls = 0
+                file_action_valid_calls = 0
+                file_observation_valid_calls = 0
                 file_invalid_details = []
                 
                 # 提取response中的所有工具调用
@@ -323,6 +327,14 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
                             call_info['observation_error'] = obs_error
                         file_invalid_details.append(call_info)
                         
+                        # 分别统计 action 和 observation 的合法数
+                        if args_valid:
+                            file_action_valid_calls += 1
+                            action_valid_calls += 1
+                        if obs_valid:
+                            file_observation_valid_calls += 1
+                            observation_valid_calls += 1
+                        
                         # 只有args和observation都合法才算合法
                         if args_valid and obs_valid:
                             file_valid_calls += 1
@@ -338,6 +350,8 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
                     'total_calls': file_total_calls,
                     'valid_calls': file_valid_calls,
                     'invalid_calls': file_total_calls - file_valid_calls,
+                    'action_valid_calls': file_action_valid_calls,
+                    'observation_valid_calls': file_observation_valid_calls,
                     'calls_details': file_invalid_details
                 })
             
@@ -355,7 +369,9 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
             'Acc_schema': overall_accuracy,
             'total_calls': total_calls,
             'valid_calls': valid_calls,
-            'invalid_calls': total_calls - valid_calls
+            'invalid_calls': total_calls - valid_calls,
+            'action_valid_calls': action_valid_calls,
+            'observation_valid_calls': observation_valid_calls
         }
     }
     
@@ -381,6 +397,8 @@ def print_results(result: Dict):
         print(f"  总调用数: {file_result['total_calls']}")
         print(f"  合法调用数: {file_result['valid_calls']}")
         print(f"  非法调用数: {file_result['invalid_calls']}")
+        print(f"  Action合法数: {file_result['action_valid_calls']}")
+        print(f"  Observation合法数: {file_result['observation_valid_calls']}")
         print(f"  Acc_schema: {file_result['Acc_schema']:.4f} ({file_result['Acc_schema']*100:.2f}%)")
         
         if file_result['calls_details']:
@@ -405,6 +423,8 @@ def print_results(result: Dict):
     print(f"总调用数 (N_call): {overall['total_calls']}")
     print(f"合法调用数 (N_schema_valid): {overall['valid_calls']}")
     print(f"非法调用数: {overall['invalid_calls']}")
+    print(f"Action合法数: {overall['action_valid_calls']}")
+    print(f"Observation合法数: {overall['observation_valid_calls']}")
     print(f"Schema合法率 (Acc_schema): {overall['Acc_schema']:.4f} ({overall['Acc_schema']*100:.2f}%)")
     print("="*60)
 
