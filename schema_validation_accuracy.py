@@ -7,6 +7,107 @@ from typing import Dict, List, Set, Tuple, Any, Optional
 from jsonschema import validate, ValidationError, Draft7Validator
 
 
+def fix_json_string(s: str) -> str:
+    """
+    修复常见的JSON格式问题，使其可以被正确解析
+    
+    处理的问题：
+    1. 未加引号的key（如 enum: -> "enum":)
+    2. 单引号转双引号
+    3. Python None -> null
+    4. Python True/False -> true/false
+    5. 尾随逗号
+    """
+    if not s:
+        return s
+    
+    # 步骤1: 修复未加引号的key（在 { 或 , 后面的标识符后跟着 :）
+    # 匹配模式: {key: 或 ,key: 或 { key: 或 , key:
+    s = re.sub(r'([{,])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', s)
+    
+    # 步骤2: 将单引号转换为双引号
+    # 需要小心处理，避免影响字符串内容中的引号
+    result = []
+    in_string = False
+    string_char = None
+    i = 0
+    while i < len(s):
+        c = s[i]
+        
+        if not in_string:
+            if c == '"':
+                in_string = True
+                string_char = '"'
+                result.append(c)
+            elif c == "'":
+                in_string = True
+                string_char = "'"
+                result.append('"')  # 单引号转双引号
+            else:
+                result.append(c)
+        else:
+            if c == '\\' and i + 1 < len(s):
+                # 转义字符
+                result.append(c)
+                result.append(s[i + 1])
+                i += 2
+                continue
+            elif c == string_char:
+                in_string = False
+                string_char = None
+                result.append('"')  # 统一转为双引号
+            else:
+                result.append(c)
+        i += 1
+    
+    s = ''.join(result)
+    
+    # 步骤3: 处理 Python 的 None, True, False
+    # 只在非字符串上下文中替换
+    s = re.sub(r'\bNone\b', 'null', s)
+    s = re.sub(r'\bTrue\b', 'true', s)
+    s = re.sub(r'\bFalse\b', 'false', s)
+    
+    # 步骤4: 移除尾随逗号 (,] 或 ,})
+    s = re.sub(r',\s*([\]\}])', r'\1', s)
+    
+    return s
+
+
+def parse_schema_string(schema_str: str, tool_name: str, field_name: str) -> Optional[Dict]:
+    """
+    解析 schema 字符串，支持多种格式容错
+    
+    Args:
+        schema_str: 原始 schema 字符串
+        tool_name: 工具名（用于日志）
+        field_name: 字段名（Parameters 或 Output）
+        
+    Returns:
+        解析后的字典，失败返回 None
+    """
+    # 方法1: 使用 fix_json_string 修复后解析
+    try:
+        fixed_str = fix_json_string(schema_str)
+        return json.loads(fixed_str)
+    except Exception as e:
+        pass
+    
+    # 方法2: 尝试 ast.literal_eval（处理 Python dict 字面量）
+    try:
+        return ast.literal_eval(schema_str)
+    except Exception as e:
+        pass
+    
+    # 方法3: 简单替换后尝试
+    try:
+        simple_fix = schema_str.replace('None', 'null').replace("'", '"')
+        return json.loads(simple_fix)
+    except Exception as e:
+        print(f"警告: 解析工具 {tool_name} 的 {field_name} 失败: {schema_str[:100]}...")
+        return None
+
+
 def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
     """
     提取从 start_pos 开始的平衡花括号内容
@@ -126,16 +227,7 @@ def parse_tool_schema(tool_schema_path: str) -> Dict[str, Dict]:
         if params_pos != -1:
             params_str = extract_balanced_braces(block, params_pos)
             if params_str:
-                try:
-                    # 处理None值并解析
-                    params_str_clean = params_str.replace('None', 'null')
-                    input_schema = json.loads(params_str_clean.replace("'", '"'))
-                except Exception as e:
-                    print(f"警告: 解析工具 {tool_name} 的Parameters失败 (JSON): {e}")
-                    try:
-                        input_schema = ast.literal_eval(params_str)
-                    except Exception as e2:
-                        print(f"警告: 解析工具 {tool_name} 的Parameters失败 (AST): {e2}")
+                input_schema = parse_schema_string(params_str, tool_name, 'Parameters')
         
         # 提取Output (输出schema) - 使用平衡括号匹配
         output_schema = None
@@ -143,15 +235,7 @@ def parse_tool_schema(tool_schema_path: str) -> Dict[str, Dict]:
         if output_pos != -1:
             output_str = extract_balanced_braces(block, output_pos)
             if output_str:
-                try:
-                    output_str_clean = output_str.replace('None', 'null')
-                    output_schema = json.loads(output_str_clean.replace("'", '"'))
-                except Exception as e:
-                    print(f"警告: 解析工具 {tool_name} 的Output失败 (JSON): {e}")
-                    try:
-                        output_schema = ast.literal_eval(output_str)
-                    except Exception as e2:
-                        print(f"警告: 解析工具 {tool_name} 的Output失败 (AST): {e2}")
+                output_schema = parse_schema_string(output_str, tool_name, 'Output')
             else:
                 print(f"警告: 工具 {tool_name} 的Output未找到有效的花括号内容")
         
