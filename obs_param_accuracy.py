@@ -371,6 +371,12 @@ def check_obs_param_match(
     """
     检查 action 参数是否正确引用了历史 observation
     
+    新逻辑（所有参数都通过LLM判断）：
+    - 跳过query已检查的参数
+    - 跳过常量值
+    - 对剩余所有参数使用LLM进行语义判断
+    - 支持精确匹配和语义匹配（如"光模块"→"optical_model"）
+    
     Args:
         args: action 的参数字典
         query_checked_params: query_param_accuracy 已检查的参数名列表（需排除）
@@ -407,12 +413,7 @@ def check_obs_param_match(
         # 到这里，是 observation 参数，需要检查
         total_count += 1
         
-        # 第一步：检查是否在历史 observation 中（快速匹配）
-        if value_in_set(param_str, history_obs_values):
-            correct_count += 1
-            continue
-        
-        # 第二步：使用LLM进行语义判断
+        # 使用LLM进行语义判断（所有参数都通过LLM评估）
         verified = verify_param_from_context(
             param_str, history_obs_values, current_cot, model, tokenizer, llm_cache
         )
