@@ -175,18 +175,10 @@ def fix_anyof_structure(s: str) -> str:
                 if last_brace != -1:
                     remaining = remaining[:last_brace] + remaining[last_brace+1:]
         
-        # 重组
-        result = f'{quote}{key.lower()}{quote}:[{remaining}]'
+        # 重组，保持原始关键字大小写
+        result = f'{quote}{key}{quote}:[{remaining}]'
         if outer_props:
             result += ''.join(outer_props)
-        
-        # 修正关键字大小写
-        if key.lower() == 'anyof':
-            result = result.replace(f'{quote}anyof{quote}', f'{quote}anyOf{quote}')
-        elif key.lower() == 'oneof':
-            result = result.replace(f'{quote}oneof{quote}', f'{quote}oneOf{quote}')
-        elif key.lower() == 'allof':
-            result = result.replace(f'{quote}allof{quote}', f'{quote}allOf{quote}')
         
         return result
     
@@ -334,10 +326,10 @@ def fix_json_string(s: str) -> str:
     # 步骤6: 移除尾随逗号 (,] 或 ,})
     s = re.sub(r',\s*([\]\}])', r'\1', s)
     
-    # 步骤7: 修复常见的 JSON Schema 关键字大小写
-    s = re.sub(r'"anyof":', '"anyOf":', s, flags=re.IGNORECASE)
-    s = re.sub(r'"oneof":', '"oneOf":', s, flags=re.IGNORECASE)
-    s = re.sub(r'"allof":', '"allOf":', s, flags=re.IGNORECASE)
+    # 步骤7: 不修复 JSON Schema 关键字大小写，保持原样
+    # s = re.sub(r'"anyof":', '"anyOf":', s, flags=re.IGNORECASE)
+    # s = re.sub(r'"oneof":', '"oneOf":', s, flags=re.IGNORECASE)
+    # s = re.sub(r'"allof":', '"allOf":', s, flags=re.IGNORECASE)
     
     return s
 
@@ -393,19 +385,21 @@ def normalize_quotes(text: str) -> str:
     return ''.join(result)
 
 
-def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
+def extract_balanced_braces(text: str, start_pos: int = 0, normalize: bool = True) -> Optional[str]:
     """
     提取从 start_pos 开始的平衡花括号内容
     
     Args:
         text: 要搜索的文本
         start_pos: 开始位置
+        normalize: 是否先标准化引号（默认True）
         
     Returns:
         平衡的花括号内容（包含外层花括号），如果没有找到则返回 None
     """
     # 先将单引号统一转换为双引号，避免混合引号导致的解析问题
-    text = normalize_quotes(text)
+    if normalize:
+        text = normalize_quotes(text)
     
     # 从start_pos开始查找第一个{
     brace_start = text.find('{', start_pos)
@@ -501,9 +495,70 @@ def parse_schema_string(schema_str: str) -> Optional[Dict]:
     return None
 
 
+def check_field_loss(original_text: str, parsed_schema: Dict, tool_name: str, schema_type: str) -> List[str]:
+    """
+    检查原始文本中的关键字段是否在解析结果中丢失
+    
+    策略：
+    1. 提取原始文本中出现的所有字段名（在引号中的）
+    2. 检查这些字段名是否在解析后的schema中存在
+    3. 只报告丢失的字段
+    
+    Args:
+        original_text: 原始文本片段
+        parsed_schema: 解析后的schema
+        tool_name: 工具名
+        schema_type: 'Parameters' 或 'Output'
+        
+    Returns:
+        丢失字段的警告列表
+    """
+    warnings = []
+    
+    if not original_text or not parsed_schema:
+        return warnings
+    
+    # 提取原始文本中的所有字段名（在引号中的）
+    # 匹配模式: "field_name" 或 'field_name' 后面跟着 :
+    field_pattern = r'["\']([a-zA-Z_][a-zA-Z0-9_]*)["\']\s*:'
+    original_fields = set(re.findall(field_pattern, original_text))
+    
+    # 递归提取解析后的schema中的所有字段名
+    def extract_all_keys(obj, keys=None):
+        if keys is None:
+            keys = set()
+        if isinstance(obj, dict):
+            keys.update(obj.keys())
+            for value in obj.values():
+                extract_all_keys(value, keys)
+        elif isinstance(obj, list):
+            for item in obj:
+                extract_all_keys(item, keys)
+        return keys
+    
+    parsed_fields = extract_all_keys(parsed_schema)
+    
+    # 找出丢失的字段
+    lost_fields = original_fields - parsed_fields
+    
+    # 过滤掉一些常见的非关键字段（可能是误报）
+    # 例如：如果原文本中有 "type":"string" 但解析后变成 type: "string"，
+    # 那么 "string" 也会被匹配为字段名，但实际上它是值
+    common_values = {'string', 'integer', 'number', 'boolean', 'array', 'object', 'null',
+                     'low', 'medium', 'high', 'complete', 'partial', 'true', 'false'}
+    lost_fields = lost_fields - common_values
+    
+    if lost_fields:
+        for field in sorted(lost_fields):
+            warnings.append(f"工具 {tool_name} - {schema_type}.{field} - 字段在解析后丢失")
+    
+    return warnings
+
+
 def validate_schema(schema: Dict, schema_type: str, tool_name: str) -> List[str]:
     """
     验证 schema 的完整性和有效性
+    注意：此函数已废弃，改用 compare_schemas 进行对比验证
     
     Args:
         schema: 要验证的 schema 字典
@@ -513,53 +568,8 @@ def validate_schema(schema: Dict, schema_type: str, tool_name: str) -> List[str]
     Returns:
         警告信息列表
     """
-    warnings = []
-    
-    if not schema:
-        warnings.append(f"工具 {tool_name} - {schema_type} 为空")
-        return warnings
-    
-    # 验证 Parameters schema
-    if schema_type == 'Parameters':
-        # 检查是否有 properties
-        if 'properties' not in schema or not schema['properties']:
-            warnings.append(f"工具 {tool_name} - Parameters 缺少 properties 定义")
-        else:
-            # 检查每个属性是否有 type 或 title
-            for prop_name, prop_def in schema['properties'].items():
-                if not isinstance(prop_def, dict):
-                    warnings.append(f"工具 {tool_name} - Parameters.{prop_name} 定义不是对象")
-                    continue
-                
-                if 'type' not in prop_def and 'anyOf' not in prop_def and 'oneOf' not in prop_def:
-                    warnings.append(f"工具 {tool_name} - Parameters.{prop_name} 缺少 type 定义")
-                
-                if 'title' not in prop_def and 'description' not in prop_def:
-                    warnings.append(f"工具 {tool_name} - Parameters.{prop_name} 缺少 title/description")
-        
-        # 检查是否有 type: object
-        if 'type' not in schema:
-            warnings.append(f"工具 {tool_name} - Parameters 缺少顶层 type 定义")
-        elif schema['type'] != 'object':
-            warnings.append(f"工具 {tool_name} - Parameters type 应为 'object'，当前为 '{schema['type']}'")
-    
-    # 验证 Output schema
-    elif schema_type == 'Output':
-        # 检查是否有 properties 或 type
-        if 'properties' not in schema and 'type' not in schema:
-            warnings.append(f"工具 {tool_name} - Output 既无 properties 也无 type 定义")
-        
-        # 如果有 properties，检查是否为空
-        if 'properties' in schema:
-            if not schema['properties']:
-                warnings.append(f"工具 {tool_name} - Output properties 为空")
-            else:
-                # 检查每个输出字段是否有 type
-                for prop_name, prop_def in schema['properties'].items():
-                    if isinstance(prop_def, dict) and 'type' not in prop_def:
-                        warnings.append(f"工具 {tool_name} - Output.{prop_name} 缺少 type 定义")
-    
-    return warnings
+    # 此函数保留但不再使用，避免破坏现有代码
+    return []
 
 
 def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True, debug: bool = False):
@@ -614,16 +624,20 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True, 
         params_pos = block.find('Parameters:')
         params_raw_text = ''  # 记录原始文本
         if params_pos != -1:
-            # 提取Parameters后的原始文本（用于调试）
+            # 提取Parameters后的原始文本（用于调试和对比）
             params_line_end = block.find('\n', params_pos)
             if params_line_end != -1:
                 params_raw_text = block[params_pos:params_line_end].strip()
             else:
                 params_raw_text = block[params_pos:].strip()
             
-            params_str = extract_balanced_braces(block, params_pos)
+            # 提取标准化后的文本
+            params_str = extract_balanced_braces(block, params_pos, normalize=True)
+            
             if params_str:
+                # 解析标准化后的文本
                 params_schema = parse_schema_string(params_str)
+                
                 if params_schema is None:
                     parse_errors.append(f"工具 {tool_num} ({tool_name}) - Parameters 解析失败")
                     if debug:
@@ -639,16 +653,20 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True, 
         output_pos = block.find('Output:')
         output_raw_text = ''  # 记录原始文本
         if output_pos != -1:
-            # 提取Output后的原始文本（用于调试）
+            # 提取Output后的原始文本（用于调试和对比）
             output_line_end = block.find('\n', output_pos)
             if output_line_end != -1:
                 output_raw_text = block[output_pos:output_line_end].strip()
             else:
                 output_raw_text = block[output_pos:].strip()
             
-            output_str = extract_balanced_braces(block, output_pos)
+            # 提取标准化后的文本
+            output_str = extract_balanced_braces(block, output_pos, normalize=True)
+            
             if output_str:
+                # 解析标准化后的文本
                 output_schema = parse_schema_string(output_str)
+                
                 if output_schema is None:
                     parse_errors.append(f"工具 {tool_num} ({tool_name}) - Output 解析失败")
                     if debug:
@@ -685,13 +703,13 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True, 
         
         normalized_tools.append(normalized_block)
         
-        # 验证schema质量
-        if params_schema:
-            param_warnings = validate_schema(params_schema, 'Parameters', tool_name)
+        # 检查原始文本中的字段是否在解析后丢失
+        if params_schema and params_raw_text:
+            param_warnings = check_field_loss(params_raw_text, params_schema, tool_name, 'Parameters')
             validation_warnings.extend(param_warnings)
         
-        if output_schema:
-            output_warnings = validate_schema(output_schema, 'Output', tool_name)
+        if output_schema and output_raw_text:
+            output_warnings = check_field_loss(output_raw_text, output_schema, tool_name, 'Output')
             validation_warnings.extend(output_warnings)
     
     # 写入标准化文件
@@ -742,8 +760,8 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True, 
 
 
 if __name__ == "__main__":
-    input_file = "/mnt/data/kw/ly/precision_index/tool.txt"
-    output_file = "/mnt/data/kw/ly/precision_index/tool_normalized.txt"
+    input_file = "/Users/liaoying/Desktop/研一/llm/data_eval/precision_index/tool.txt"
+    output_file = "/Users/liaoying/Desktop/研一/llm/data_eval/precision_index/tool_normalized.txt"
     
     # 设置 debug=True 可以看到详细的调试信息
     success, errors = normalize_tool_txt(input_file, output_file, verbose=True, debug=True)
