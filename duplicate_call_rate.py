@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-重复调用率计算脚本
+"""重复调用率计算脚本
 
 指标定义：
-1. Rate_exact_dup: 完全重复率（tool_name + args 完全相同）
-2. Rate_tool_dup: 工具名重复率（仅 tool_name 相同，不考虑参数）
-3. Rate_consecutive_dup: 连续重复率（与上一次调用完全相同）
-4. Avg_param_similarity: 同工具调用间的参数相似度均值
+1. Rate_tool_dup: 工具重复率（工具名相同即算重复）
+2. Rate_consecutive_dup: 连续重复率（与上一次调用完全相同，反映模型卡住）
+
+说明：
+- 每个JSON文件是一条独立对话
+- 文件级指标：评估单条对话内的重复情况
+- Overall指标：所有对话的平均重复率
 """
 
 import json
@@ -150,95 +152,62 @@ def calculate_duplicate_metrics(calls: List[Dict]) -> Dict:
     if total_calls == 0:
         return {
             'total_calls': 0,
-            'exact_dup_count': 0,
             'tool_dup_count': 0,
             'consecutive_dup_count': 0,
-            'Rate_exact_dup': 0.0,
             'Rate_tool_dup': 0.0,
             'Rate_consecutive_dup': 0.0,
-            'Avg_param_similarity': 0.0,
             'duplicate_details': []
         }
     
-    # 用于跟踪已出现的签名和工具名
-    seen_signatures = set()
+    # 用于跟踪已出现的工具名
     seen_tools = set()
     
     # 统计变量
-    exact_dup_count = 0
     tool_dup_count = 0
     consecutive_dup_count = 0
     
-    # 按工具名分组的调用，用于计算参数相似度
-    tool_calls_map = defaultdict(list)
+    # 按工具名分组，记录每个工具的所有step
+    tool_steps_map = defaultdict(list)
     
-    # 重复详情
-    duplicate_details = []
-    
-    # 上一次调用的签名
+    # 上一次调用的签名（用于检测连续重复）
     prev_signature = None
     
-    for idx, call in enumerate(calls):
+    for call in calls:
         tool_name = call['tool_name']
         args = call['args']
+        step = call['step']
         signature = get_call_signature(tool_name, args)
         
-        # 检查完全重复
-        is_exact_dup = signature in seen_signatures
-        if is_exact_dup:
-            exact_dup_count += 1
+        # 记录该工具的step
+        tool_steps_map[tool_name].append(step)
         
         # 检查工具名重复
-        is_tool_dup = tool_name in seen_tools
-        if is_tool_dup:
+        if tool_name in seen_tools:
             tool_dup_count += 1
-        
-        # 检查连续重复
-        is_consecutive_dup = (prev_signature is not None and signature == prev_signature)
-        if is_consecutive_dup:
-            consecutive_dup_count += 1
-        
-        # 记录重复详情
-        if is_exact_dup or is_consecutive_dup:
-            duplicate_details.append({
-                'call_index': idx,
-                'step': call['step'],
-                'tool_name': tool_name,
-                'args': args,
-                'is_exact_dup': is_exact_dup,
-                'is_consecutive_dup': is_consecutive_dup
-            })
-        
-        # 更新跟踪状态
-        seen_signatures.add(signature)
         seen_tools.add(tool_name)
-        prev_signature = signature
         
-        # 记录到工具调用映射
-        tool_calls_map[tool_name].append(args)
+        # 检查连续重复（工具名+参数完全相同）
+        if prev_signature is not None and signature == prev_signature:
+            consecutive_dup_count += 1
+        prev_signature = signature
     
-    # 计算同工具调用间的参数相似度
-    param_similarities = []
-    for tool_name, args_list in tool_calls_map.items():
-        if len(args_list) < 2:
-            continue
-        # 计算该工具所有调用对之间的相似度
-        for i in range(len(args_list)):
-            for j in range(i + 1, len(args_list)):
-                sim = calculate_param_similarity(args_list[i], args_list[j])
-                param_similarities.append(sim)
-    
-    avg_param_similarity = sum(param_similarities) / len(param_similarities) if param_similarities else 0.0
+    # 构建duplicate_details：只包含调用次数>1的工具
+    duplicate_details = [
+        {
+            'tool_name': tool_name,
+            'steps': steps,
+            'call_count': len(steps)
+        }
+        for tool_name, steps in sorted(tool_steps_map.items())
+        if len(steps) > 1
+    ]
     
     return {
         'total_calls': total_calls,
-        'exact_dup_count': exact_dup_count,
         'tool_dup_count': tool_dup_count,
         'consecutive_dup_count': consecutive_dup_count,
-        'Rate_exact_dup': exact_dup_count / total_calls,
         'Rate_tool_dup': tool_dup_count / total_calls,
         'Rate_consecutive_dup': consecutive_dup_count / total_calls,
-        'Avg_param_similarity': avg_param_similarity,
         'duplicate_details': duplicate_details
     }
 
@@ -258,13 +227,6 @@ def calculate_duplicate_call_rate(
         包含统计结果的字典
     """
     per_file_results = []
-    
-    # 总体统计
-    total_calls_all = 0
-    exact_dup_all = 0
-    tool_dup_all = 0
-    consecutive_dup_all = 0
-    param_similarities_all = []
     
     # 遍历数据文件夹
     for folder in data_folders:
@@ -299,27 +261,14 @@ def calculate_duplicate_call_rate(
                 # 计算该文件的重复指标
                 metrics = calculate_duplicate_metrics(calls)
                 
-                # 累加到总体统计
-                total_calls_all += metrics['total_calls']
-                exact_dup_all += metrics['exact_dup_count']
-                tool_dup_all += metrics['tool_dup_count']
-                consecutive_dup_all += metrics['consecutive_dup_count']
-                
-                # 收集参数相似度用于计算总体均值
-                if metrics['Avg_param_similarity'] > 0:
-                    param_similarities_all.append(metrics['Avg_param_similarity'])
-                
                 # 记录文件结果
                 file_result = {
                     'file': str(json_file),
                     'total_calls': metrics['total_calls'],
-                    'exact_dup_count': metrics['exact_dup_count'],
                     'tool_dup_count': metrics['tool_dup_count'],
                     'consecutive_dup_count': metrics['consecutive_dup_count'],
-                    'Rate_exact_dup': metrics['Rate_exact_dup'],
                     'Rate_tool_dup': metrics['Rate_tool_dup'],
                     'Rate_consecutive_dup': metrics['Rate_consecutive_dup'],
-                    'Avg_param_similarity': metrics['Avg_param_similarity'],
                     'duplicate_details': metrics['duplicate_details']
                 }
                 per_file_results.append(file_result)
@@ -330,16 +279,18 @@ def calculate_duplicate_call_rate(
                 traceback.print_exc()
                 continue
     
-    # 计算总体指标
+    # 计算总体指标（文件内平均）
+    if per_file_results:
+        avg_rate_tool_dup = sum(f['Rate_tool_dup'] for f in per_file_results) / len(per_file_results)
+        avg_rate_consecutive_dup = sum(f['Rate_consecutive_dup'] for f in per_file_results) / len(per_file_results)
+    else:
+        avg_rate_tool_dup = 0.0
+        avg_rate_consecutive_dup = 0.0
+    
     overall = {
-        'total_calls': total_calls_all,
-        'exact_dup_count': exact_dup_all,
-        'tool_dup_count': tool_dup_all,
-        'consecutive_dup_count': consecutive_dup_all,
-        'Rate_exact_dup': exact_dup_all / total_calls_all if total_calls_all > 0 else 0.0,
-        'Rate_tool_dup': tool_dup_all / total_calls_all if total_calls_all > 0 else 0.0,
-        'Rate_consecutive_dup': consecutive_dup_all / total_calls_all if total_calls_all > 0 else 0.0,
-        'Avg_param_similarity': sum(param_similarities_all) / len(param_similarities_all) if param_similarities_all else 0.0
+        'total_files': len(per_file_results),
+        'avg_rate_tool_dup': avg_rate_tool_dup,
+        'avg_rate_consecutive_dup': avg_rate_consecutive_dup
     }
     
     return {
@@ -366,39 +317,27 @@ def print_results(result: Dict):
     for file_result in result['per_file_results']:
         print(f"\n文件: {file_result['file']}")
         print(f"  总调用数: {file_result['total_calls']}")
-        print(f"  完全重复数: {file_result['exact_dup_count']}")
-        print(f"  工具名重复数: {file_result['tool_dup_count']}")
+        print(f"  工具重复数: {file_result['tool_dup_count']}")
         print(f"  连续重复数: {file_result['consecutive_dup_count']}")
-        print(f"  Rate_exact_dup: {file_result['Rate_exact_dup']:.4f} ({file_result['Rate_exact_dup']*100:.2f}%)")
         print(f"  Rate_tool_dup: {file_result['Rate_tool_dup']:.4f} ({file_result['Rate_tool_dup']*100:.2f}%)")
         print(f"  Rate_consecutive_dup: {file_result['Rate_consecutive_dup']:.4f} ({file_result['Rate_consecutive_dup']*100:.2f}%)")
-        print(f"  Avg_param_similarity: {file_result['Avg_param_similarity']:.4f}")
         
         if file_result['duplicate_details']:
-            print(f"  重复调用详情:")
+            print(f"  重复工具详情:")
             for detail in file_result['duplicate_details'][:5]:  # 只显示前5个
-                dup_types = []
-                if detail['is_exact_dup']:
-                    dup_types.append("完全重复")
-                if detail['is_consecutive_dup']:
-                    dup_types.append("连续重复")
-                print(f"    - [{detail['step']}] {detail['tool_name']} ({', '.join(dup_types)})")
+                steps_str = ', '.join(detail['steps'])
+                print(f"    - {detail['tool_name']} (调用{detail['call_count']}次): {steps_str}")
             if len(file_result['duplicate_details']) > 5:
-                print(f"    ... 还有 {len(file_result['duplicate_details']) - 5} 条重复调用")
+                print(f"    ... 还有 {len(file_result['duplicate_details']) - 5} 个重复工具")
     
     # 打印总体结果
     print("\n" + "="*60)
-    print("总体统计结果")
+    print("总体统计结果（文件内平均）")
     print("="*60)
     overall = result['overall']
-    print(f"总调用数: {overall['total_calls']}")
-    print(f"完全重复数: {overall['exact_dup_count']}")
-    print(f"工具名重复数: {overall['tool_dup_count']}")
-    print(f"连续重复数: {overall['consecutive_dup_count']}")
-    print(f"\n完全重复率 (Rate_exact_dup): {overall['Rate_exact_dup']:.4f} ({overall['Rate_exact_dup']*100:.2f}%)")
-    print(f"工具名重复率 (Rate_tool_dup): {overall['Rate_tool_dup']:.4f} ({overall['Rate_tool_dup']*100:.2f}%)")
-    print(f"连续重复率 (Rate_consecutive_dup): {overall['Rate_consecutive_dup']:.4f} ({overall['Rate_consecutive_dup']*100:.2f}%)")
-    print(f"平均参数相似度 (Avg_param_similarity): {overall['Avg_param_similarity']:.4f}")
+    print(f"总文件数: {overall['total_files']}")
+    print(f"\n平均工具重复率 (avg_rate_tool_dup): {overall['avg_rate_tool_dup']:.4f} ({overall['avg_rate_tool_dup']*100:.2f}%)")
+    print(f"平均连续重复率 (avg_rate_consecutive_dup): {overall['avg_rate_consecutive_dup']:.4f} ({overall['avg_rate_consecutive_dup']*100:.2f}%)")
     print("="*60)
 
 
@@ -410,7 +349,7 @@ if __name__ == "__main__":
     ]
     
     # 排除最后 N 个 steps（设为 2 排除最后两个总结 step，设为 0 不排除）
-    exclude_last_steps = 2
+    exclude_last_steps = 0
     
     # 计算重复调用率
     result = calculate_duplicate_call_rate(data_folders, exclude_last_steps)
