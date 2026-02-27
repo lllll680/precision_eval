@@ -192,19 +192,37 @@ def is_constant_value(param_value: str) -> bool:
 
 def extract_json_robust(text: str) -> Optional[Dict]:
     """
-    从文本中提取JSON（支持多种格式）
+    从文本中提取JSON（支持多种格式，包括Qwen模型的<think>标签）
     """
+    # 移除<think>标签及其内容
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<think>.*', '', text)  # 处理未闭合的<think>
+    
+    # 移除其他可能的标签
+    text = re.sub(r'<[^>]+>', '', text)
+    
     # 尝试直接解析
     try:
         return json.loads(text.strip())
     except:
         pass
     
-    # 查找JSON对象
+    # 查找JSON对象（更宽松的匹配）
     json_match = re.search(r'\{[^{}]*"(verified|from_context)"[^{}]*\}', text)
     if json_match:
         try:
             return json.loads(json_match.group(0))
+        except:
+            pass
+    
+    # 尝试提取任何JSON对象
+    json_match = re.search(r'\{.*?\}', text, re.DOTALL)
+    if json_match:
+        try:
+            result = json.loads(json_match.group(0))
+            # 验证是否包含期望的字段
+            if 'from_context' in result or 'verified' in result:
+                return result
         except:
             pass
     
