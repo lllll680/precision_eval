@@ -74,6 +74,43 @@ def fix_json_string(s: str) -> str:
     return s
 
 
+def normalize_schema_types(schema: Any) -> Any:
+    """
+    递归地将schema中的非标准类型转换为JSON Schema标准类型
+    
+    转换规则：
+    - 'float' -> 'number'
+    - 'int' -> 'integer'
+    
+    Args:
+        schema: 要标准化的schema（可以是dict、list或其他类型）
+        
+    Returns:
+        标准化后的schema
+    """
+    if isinstance(schema, dict):
+        result = {}
+        for key, value in schema.items():
+            if key == 'type' and isinstance(value, str):
+                # 转换类型名称
+                if value == 'float':
+                    result[key] = 'number'
+                elif value == 'int':
+                    result[key] = 'integer'
+                else:
+                    result[key] = value
+            else:
+                # 递归处理嵌套的schema
+                result[key] = normalize_schema_types(value)
+        return result
+    elif isinstance(schema, list):
+        # 递归处理数组中的每个元素
+        return [normalize_schema_types(item) for item in schema]
+    else:
+        # 其他类型直接返回
+        return schema
+
+
 def parse_schema_string(schema_str: str, tool_name: str, field_name: str) -> Optional[Dict]:
     """
     解析 schema 字符串，支持多种格式容错
@@ -86,26 +123,36 @@ def parse_schema_string(schema_str: str, tool_name: str, field_name: str) -> Opt
     Returns:
         解析后的字典，失败返回 None
     """
+    parsed_schema = None
+    
     # 方法1: 使用 fix_json_string 修复后解析
     try:
         fixed_str = fix_json_string(schema_str)
-        return json.loads(fixed_str)
+        parsed_schema = json.loads(fixed_str)
     except Exception as e:
         pass
     
     # 方法2: 尝试 ast.literal_eval（处理 Python dict 字面量）
-    try:
-        return ast.literal_eval(schema_str)
-    except Exception as e:
-        pass
+    if parsed_schema is None:
+        try:
+            parsed_schema = ast.literal_eval(schema_str)
+        except Exception as e:
+            pass
     
     # 方法3: 简单替换后尝试
-    try:
-        simple_fix = schema_str.replace('None', 'null').replace("'", '"')
-        return json.loads(simple_fix)
-    except Exception as e:
-        print(f"警告: 解析工具 {tool_name} 的 {field_name} 失败: {schema_str[:100]}...")
-        return None
+    if parsed_schema is None:
+        try:
+            simple_fix = schema_str.replace('None', 'null').replace("'", '"')
+            parsed_schema = json.loads(simple_fix)
+        except Exception as e:
+            print(f"警告: 解析工具 {tool_name} 的 {field_name} 失败: {schema_str[:100]}...")
+            return None
+    
+    # 标准化类型（将float转换为number等）
+    if parsed_schema is not None:
+        parsed_schema = normalize_schema_types(parsed_schema)
+    
+    return parsed_schema
 
 
 def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
