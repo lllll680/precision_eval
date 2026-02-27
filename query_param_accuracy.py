@@ -134,6 +134,32 @@ def extract_json_robust(text: str) -> Optional[Any]:
     return None
 
 
+def load_entities_from_config(config_path: str) -> Dict[str, List[str]]:
+    """
+    从配置文件加载每个文件夹的实体列表
+    
+    Args:
+        config_path: 配置文件路径，JSON格式
+        
+    Returns:
+        {folder_name: [entity1, entity2, ...]}
+        
+    配置文件格式示例:
+    {
+        "data1": ["192.168.100.2", "borderleaf01", "10GE1/0/24"],
+        "data2": ["10.84.21.109", "serverleaf01"]
+    }
+    """
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        print(f"成功加载实体配置文件: {config_path}")
+        return config
+    except Exception as e:
+        print(f"警告: 加载实体配置文件失败: {e}")
+        return {}
+
+
 def extract_entities_from_query(query: str, model, tokenizer) -> List[str]:
     """
     使用Qwen模型从query中提取所有实体值（不区分类型）
@@ -341,14 +367,17 @@ def load_schema_validation_results(schema_result_path: str) -> Dict[str, Dict[st
     return valid_calls_map
 
 
-def calculate_query_param_accuracy(data_folders: List[str], model_path: str, 
+def calculate_query_param_accuracy(data_folders: List[str], 
+                                    model_path: Optional[str] = None,
+                                    entities_config_path: Optional[str] = None,
                                     schema_result_path: Optional[str] = None) -> Dict:
     """
     计算Query参数引用正确率
     
     Args:
         data_folders: 数据文件夹路径列表
-        model_path: Qwen模型路径
+        model_path: Qwen模型路径（可选，如果提供entities_config_path则不需要）
+        entities_config_path: 实体配置文件路径（可选，JSON格式，键为文件夹名，值为实体列表）
         schema_result_path: schema验证结果文件路径（可选），用于计算联合指标
         
     Returns:
@@ -360,15 +389,29 @@ def calculate_query_param_accuracy(data_folders: List[str], model_path: str,
         print(f"加载schema验证结果: {schema_result_path}")
         schema_valid_map = load_schema_validation_results(schema_result_path)
     
-    # 加载Qwen模型
-    print(f"正在加载模型: {model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        device_map="auto",
-        trust_remote_code=True
-    ).eval()
-    print("模型加载完成\n")
+    # 确定使用哪种模式
+    use_config_mode = entities_config_path is not None
+    entities_config = {}
+    model = None
+    tokenizer = None
+    
+    if use_config_mode:
+        # 配置文件模式：直接加载实体列表
+        print("使用配置文件模式（跳过LLM提取）")
+        entities_config = load_entities_from_config(entities_config_path)
+    else:
+        # LLM模式：加载模型进行实体提取
+        if not model_path:
+            raise ValueError("必须提供 model_path 或 entities_config_path 之一")
+        print("使用LLM提取模式")
+        print(f"正在加载模型: {model_path}")
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            device_map="auto",
+            trust_remote_code=True
+        ).eval()
+        print("模型加载完成\n")
     
     # 统计变量 - 独立指标（所有calls）
     total_params = 0  # 需要检查的参数总数
@@ -422,8 +465,19 @@ def calculate_query_param_accuracy(data_folders: List[str], model_path: str,
                     continue
                 
                 print(f"  处理文件: {json_file.name}")
-                entities = extract_entities_from_query(query, model, tokenizer)
-                print(f"    提取的实体: {entities}")
+                
+                # 根据模式获取实体
+                if use_config_mode:
+                    # 配置文件模式：从配置中获取该文件夹的实体
+                    folder_name = data_path.name
+                    entities = entities_config.get(folder_name, [])
+                    if not entities:
+                        print(f"    警告: 配置文件中未找到文件夹 '{folder_name}' 的实体列表")
+                    print(f"    从配置文件获取的实体: {entities}")
+                else:
+                    # LLM模式：使用模型提取实体
+                    entities = extract_entities_from_query(query, model, tokenizer)
+                    print(f"    LLM提取的实体: {entities}")
                 
                 # 检查response中的所有action参数
                 per_step_details = []  # 记录每个step的检查详情
@@ -606,14 +660,27 @@ if __name__ == "__main__":
         # 添加更多数据文件夹路径
     ]
     
-    # Qwen模型路径（需要填写实际路径）
-    model_path = "/mnt/data/kw/models/Qwen/Qwen2.5-7B-Instruct"  # TODO: 填写实际的Qwen3-8b模型路径
-    
     # Schema验证结果路径（用于计算联合指标）
     schema_result_path = "/mnt/data/kw/ly/precision_index/schema_validation_accuracy_result.json"
     
-    # 计算Query参数引用正确率（同时计算独立指标和联合指标）
-    result = calculate_query_param_accuracy(data_folders, model_path, schema_result_path)
+    # ========== 选择模式 ==========
+    # 模式1: 使用配置文件模式（推荐，快速且稳定）
+    # 直接提供每个文件夹的实体列表，跳过LLM提取
+    entities_config_path = "entities_config.json"  # 实体配置文件路径
+    result = calculate_query_param_accuracy(
+        data_folders, 
+        entities_config_path=entities_config_path,
+        schema_result_path=schema_result_path
+    )
+    
+    # 模式2: 使用LLM提取模式（较慢，可能出现解析错误）
+    # 使用Qwen模型从query中提取实体
+    # model_path = "/mnt/data/kw/models/Qwen/Qwen2.5-7B-Instruct"
+    # result = calculate_query_param_accuracy(
+    #     data_folders, 
+    #     model_path=model_path,
+    #     schema_result_path=schema_result_path
+    # )
     
     # 打印结果
     print_results(result)
