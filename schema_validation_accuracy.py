@@ -250,7 +250,7 @@ def parse_tool_schema(tool_schema_path: str) -> Dict[str, Dict]:
     return tools_schema
 
 
-def validate_against_schema(data: Any, schema: Dict) -> Tuple[bool, Optional[str]]:
+def validate_against_schema(data: Any, schema: Dict) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     使用JSON Schema验证数据
     
@@ -259,10 +259,10 @@ def validate_against_schema(data: Any, schema: Dict) -> Tuple[bool, Optional[str
         schema: JSON Schema
         
     Returns:
-        (是否合法, 错误信息)
+        (是否合法, 错误信息, 错误类型)
     """
     if schema is None:
-        return False, "Schema未定义或解析失败"
+        return False, "Schema未定义或解析失败", "schema_undefined"
     
     try:
         # 创建验证器
@@ -272,15 +272,39 @@ def validate_against_schema(data: Any, schema: Dict) -> Tuple[bool, Optional[str
         errors = list(validator.iter_errors(data))
         
         if errors:
-            # 收集所有错误信息
-            error_messages = [f"{e.message} at {'.'.join(str(p) for p in e.path)}" if e.path else e.message 
-                            for e in errors]
-            return False, "; ".join(error_messages)
+            # 分类错误类型
+            error_types = set()
+            error_messages = []
+            
+            for e in errors:
+                # 根据validator属性判断错误类型
+                if e.validator == 'required':
+                    error_types.add('required_property_missing')
+                elif e.validator == 'additionalProperties':
+                    error_types.add('additional_properties')
+                elif e.validator == 'type':
+                    error_types.add('type_mismatch')
+                elif e.validator == 'enum':
+                    error_types.add('enum_validation')
+                elif e.validator in ['minLength', 'maxLength', 'minimum', 'maximum']:
+                    error_types.add('constraint_violation')
+                elif e.validator in ['pattern']:
+                    error_types.add('pattern_mismatch')
+                else:
+                    error_types.add('other_validation_error')
+                
+                # 收集错误信息
+                error_msg = f"{e.message} at {'.'.join(str(p) for p in e.path)}" if e.path else e.message
+                error_messages.append(error_msg)
+            
+            # 返回主要错误类型（如果有多个，返回第一个）
+            primary_error_type = list(error_types)[0] if error_types else 'unknown'
+            return False, "; ".join(error_messages), primary_error_type
         
-        return True, None
+        return True, None, None
     
     except Exception as e:
-        return False, str(e)
+        return False, str(e), "validation_exception"
 
 
 def extract_tool_calls_with_details(response: List[Dict]) -> List[Dict]:
@@ -336,6 +360,20 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
     observation_valid_calls = 0  # observation合法的调用数
     per_file_results = []  # 每条数据的结果
     
+    # 错误类型统计
+    error_type_stats = {
+        'required_property_missing': 0,
+        'additional_properties': 0,
+        'type_mismatch': 0,
+        'enum_validation': 0,
+        'constraint_violation': 0,
+        'pattern_mismatch': 0,
+        'schema_undefined': 0,
+        'tool_not_found': 0,
+        'other_validation_error': 0,
+        'validation_exception': 0
+    }
+    
     # 遍历所有数据文件夹
     for data_folder in data_folders:
         data_path = Path(data_folder)
@@ -381,11 +419,14 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
                         # 获取该工具的schema
                         if tool_name not in tools_schema:
                             # 工具不存在，schema验证失败
+                            error_type_stats['tool_not_found'] += 1
                             file_invalid_details.append({
                                 'tool_name': tool_name,
                                 'reason': '工具不存在于schema中',
                                 'action_valid': False,
-                                'observation_valid': False
+                                'observation_valid': False,
+                                'action_error_type': 'tool_not_found',
+                                'observation_error_type': 'tool_not_found'
                             })
                             continue
                         
@@ -394,10 +435,16 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
                         output_schema = tool_schema['output_schema']
                         
                         # 验证args
-                        args_valid, args_error = validate_against_schema(args, input_schema)
+                        args_valid, args_error, args_error_type = validate_against_schema(args, input_schema)
                         
                         # 验证observation
-                        obs_valid, obs_error = validate_against_schema(observation, output_schema)
+                        obs_valid, obs_error, obs_error_type = validate_against_schema(observation, output_schema)
+                        
+                        # 统计错误类型
+                        if not args_valid and args_error_type:
+                            error_type_stats[args_error_type] = error_type_stats.get(args_error_type, 0) + 1
+                        if not obs_valid and obs_error_type:
+                            error_type_stats[obs_error_type] = error_type_stats.get(obs_error_type, 0) + 1
                         
                         # 构建调用详情（无论是否合法都记录）
                         call_info = {
@@ -407,8 +454,10 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
                         }
                         if not args_valid:
                             call_info['action_error'] = args_error
+                            call_info['action_error_type'] = args_error_type
                         if not obs_valid:
                             call_info['observation_error'] = obs_error
+                            call_info['observation_error_type'] = obs_error_type
                         file_invalid_details.append(call_info)
                         
                         # 分别统计 action 和 observation 的合法数
@@ -455,7 +504,8 @@ def calculate_schema_validation_accuracy(data_folders: List[str], tool_schema_pa
             'valid_calls': valid_calls,
             'invalid_calls': total_calls - valid_calls,
             'action_valid_calls': action_valid_calls,
-            'observation_valid_calls': observation_valid_calls
+            'observation_valid_calls': observation_valid_calls,
+            'error_type_breakdown': error_type_stats
         }
     }
     
@@ -510,6 +560,39 @@ def print_results(result: Dict):
     print(f"Action合法数: {overall['action_valid_calls']}")
     print(f"Observation合法数: {overall['observation_valid_calls']}")
     print(f"Schema合法率 (Acc_schema): {overall['Acc_schema']:.4f} ({overall['Acc_schema']*100:.2f}%)")
+    
+    # 打印错误类型分布
+    if 'error_type_breakdown' in overall:
+        print("\n错误类型分布:")
+        print("-"*60)
+        error_breakdown = overall['error_type_breakdown']
+        total_errors = sum(error_breakdown.values())
+        
+        # 错误类型中文名称映射
+        error_name_map = {
+            'required_property_missing': '缺少必需字段',
+            'additional_properties': '包含额外字段',
+            'type_mismatch': '类型不匹配',
+            'enum_validation': '枚举值不匹配',
+            'constraint_violation': '约束违反',
+            'pattern_mismatch': '模式不匹配',
+            'schema_undefined': 'Schema未定义',
+            'tool_not_found': '工具不存在',
+            'other_validation_error': '其他验证错误',
+            'validation_exception': '验证异常'
+        }
+        
+        # 按错误数量排序
+        sorted_errors = sorted(error_breakdown.items(), key=lambda x: x[1], reverse=True)
+        
+        for error_type, count in sorted_errors:
+            if count > 0:
+                percentage = (count / total_errors * 100) if total_errors > 0 else 0
+                error_name = error_name_map.get(error_type, error_type)
+                print(f"  {error_name} ({error_type}): {count} ({percentage:.2f}%)")
+        
+        print(f"\n  总错误数: {total_errors}")
+    
     print("="*60)
 
 
