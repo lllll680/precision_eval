@@ -671,13 +671,13 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True, 
                     parse_errors.append(f"工具 {tool_num} ({tool_name}) - Output 解析失败")
                     if debug:
                         debug_info.append(f"工具 {tool_num} ({tool_name}) - Output 原始文本: {output_raw_text}")
-                        debug_info.append(f"  提取的内容: {output_str[:200]}...")
+                        debug_info.append(f"  提取的内容: {output_str}...")
                 elif not output_schema or output_schema == {}:
                     # 检测静默失败：解析成功但结果为空字典
                     parse_warnings.append(f"工具 {tool_num} ({tool_name}) - Output 解析为空字典")
                     if debug:
                         debug_info.append(f"工具 {tool_num} ({tool_name}) - Output 原始文本: {output_raw_text}")
-                        debug_info.append(f"  提取的内容: {output_str[:200]}...")
+                        debug_info.append(f"  提取的内容: {output_str}...")
             else:
                 parse_warnings.append(f"工具 {tool_num} ({tool_name}) - Output 未找到花括号")
                 if debug:
