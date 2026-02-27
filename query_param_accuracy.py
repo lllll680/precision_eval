@@ -262,27 +262,27 @@ JSON输出："""
         return []
 
 
-# 需要检查的参数名列表（这些参数应该来自 Query 中的实体）
-QUERY_RELATED_PARAMS = {
-    'device_name', 'device_id', 'host_name', 'hostname',
-    'interface_name', 'interface_id', 'port_name',
-    'ip_address', 'ip', 'source_ip', 'dest_ip', 'target_ip', 'destination_ip',
-    'bgp_neighbor', 'neighbor_ip', 'peer_ip',
-    'vlan_id', 'vlan',
-}
-
-
 def check_param_match(args: Dict, entities: List[str]) -> Tuple[int, int, List[Dict], List[str], List[str]]:
     """
-    检查args中的参数值是否在query实体列表中
+    纯值匹配模式：检查参数值是否在query实体列表中
     
-    简化逻辑：
-    - 只检查特定参数名（如 device_name, ip_address 等）
-    - 参数值在 entities 列表中即为正确
-    - 不再区分实体类型，避免字段名不匹配问题
+    新逻辑（职责分离）：
+    - 遍历所有参数，不限制参数名
+    - 只要参数值在query实体列表中，就认为该参数来自query
+    - 不在query实体中的参数，交给obs_param_accuracy检查
+    - 避免参数名和值类型不匹配的问题（如interface_id可能包含observation返回的值）
+    
+    示例：
+    entities = ["serverleaf01_1_16.135", "10GE1/0/24"]
+    args = {
+        "device_name": "serverleaf01_1_16.135",  # 值匹配 → query来源 ✓
+        "interface_id": "10GE1/0/24",            # 值匹配 → query来源 ✓
+        "peer_device": "serverleaf02_1_16.135",  # 值不匹配 → obs检查
+        "ip_address": "10.9.5.1"                 # 值不匹配 → obs检查
+    }
     
     Args:
-        args: action中的参数
+        args: action中的参数字典
         entities: 从query中提取的实体值列表
         
     Returns:
@@ -291,8 +291,8 @@ def check_param_match(args: Dict, entities: List[str]) -> Tuple[int, int, List[D
     correct_count = 0
     total_count = 0
     mismatch_details = []
-    checked_params = []
-    correct_params_list = []
+    checked_params = []  # 所有值在entities中的参数名
+    correct_params_list = []  # 同checked_params（兼容性保留）
     
     # 如果query中没有提取到实体，不进行检查
     if not entities:
@@ -301,30 +301,23 @@ def check_param_match(args: Dict, entities: List[str]) -> Tuple[int, int, List[D
     # 将实体列表转换为集合，方便查找
     entities_set = set(entities)
     
+    # 遍历所有参数，进行纯值匹配
     for param_name, param_value in args.items():
-        # 只检查特定的参数名
-        if param_name.lower() not in QUERY_RELATED_PARAMS:
+        # 跳过空值
+        if param_value is None or str(param_value).strip() == '':
             continue
         
         # 将参数值转为字符串进行比较
-        param_value_str = str(param_value)
+        param_value_str = str(param_value).strip()
         
-        total_count += 1
-        checked_params.append(param_name)
-        
-        # 检查参数值是否在实体列表中
+        # 纯值匹配：只要值在实体列表中，就认为来自query
         if param_value_str in entities_set:
+            total_count += 1
             correct_count += 1
+            checked_params.append(param_name)
             correct_params_list.append(param_name)
-        else:
-            mismatch_details.append({
-                'param_name': param_name,
-                'param_value': param_value_str,
-                'query_entities': entities,
-                'error_type': 'not_in_query',
-                'reason': f'参数值不在Query实体列表中'
-            })
     
+    # 注意：不在entities中的参数不记录为错误，交给obs_param_accuracy检查
     return correct_count, total_count, mismatch_details, checked_params, correct_params_list
 
 
