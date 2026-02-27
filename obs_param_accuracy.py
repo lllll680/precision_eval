@@ -194,12 +194,18 @@ def extract_json_robust(text: str) -> Optional[Dict]:
     """
     从文本中提取JSON（支持多种格式，包括Qwen模型的<think>标签）
     """
-    # 移除<think>标签及其内容
-    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'<think>.*', '', text)  # 处理未闭合的<think>
+    original_text = text
+    
+    # 移除<think>标签及其内容（多种格式）
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<think>.*', '', text, flags=re.IGNORECASE)  # 处理未闭合的<think>
     
     # 移除其他可能的标签
     text = re.sub(r'<[^>]+>', '', text)
+    
+    # 移除markdown代码块标记
+    text = re.sub(r'```json\s*', '', text)
+    text = re.sub(r'```\s*', '', text)
     
     # 尝试直接解析
     try:
@@ -225,6 +231,12 @@ def extract_json_robust(text: str) -> Optional[Dict]:
                 return result
         except:
             pass
+    
+    # 尝试从原始文本中查找true/false关键词
+    if 'true' in text.lower() or '"from_context": true' in original_text.lower():
+        return {'from_context': True}
+    elif 'false' in text.lower() or '"from_context": false' in original_text.lower():
+        return {'from_context': False}
     
     return None
 
@@ -331,7 +343,11 @@ JSON输出："""
         verified = bool(result['from_context'])
     else:
         # 默认保守：如果无法解析，认为不是幻觉（避免误判）
-        print(f"警告: 无法解析LLM响应: {response[:100]}")
+        print(f"\n警告: 无法解析LLM响应")
+        print(f"完整响应: {response}")
+        print(f"参数值: {param_value}")
+        print(f"提取结果: {result}")
+        print("-" * 60)
         verified = True
     
     # 缓存结果
