@@ -194,6 +194,66 @@ def fix_anyof_structure(s: str) -> str:
     return s
 
 
+def fix_enum_values(s: str) -> str:
+    """
+    修复 enum 数组中缺少引号的值
+    
+    例如: enum:[complete,partial] -> enum:["complete","partial"]
+    """
+    # 查找所有 enum: [...] 模式
+    pattern = r'(["\']enum["\']\s*:\s*\[)([^\]]+)(\])'
+    
+    def fix_enum_array(match):
+        prefix = match.group(1)
+        content = match.group(2)
+        suffix = match.group(3)
+        
+        # 分割数组元素
+        items = []
+        current = []
+        in_string = False
+        string_char = None
+        
+        for c in content:
+            if not in_string:
+                if c in ('"', "'"):
+                    in_string = True
+                    string_char = c
+                    current.append(c)
+                elif c == ',':
+                    if current:
+                        items.append(''.join(current).strip())
+                        current = []
+                else:
+                    current.append(c)
+            else:
+                current.append(c)
+                if c == string_char:
+                    in_string = False
+                    string_char = None
+        
+        if current:
+            items.append(''.join(current).strip())
+        
+        # 修复每个元素：如果不是以引号开头，添加引号
+        fixed_items = []
+        for item in items:
+            item = item.strip()
+            if not item:
+                continue
+            # 如果已经有引号，保持不变
+            if item.startswith('"') or item.startswith("'"):
+                fixed_items.append(item)
+            else:
+                # 添加引号
+                fixed_items.append(f'"{item}"')
+        
+        return prefix + ','.join(fixed_items) + suffix
+    
+    s = re.sub(pattern, fix_enum_array, s, flags=re.IGNORECASE)
+    return s
+
+
 def fix_json_string(s: str) -> str:
     """
     修复常见的JSON格式问题
@@ -207,12 +267,16 @@ def fix_json_string(s: str) -> str:
     6. JSON Schema 关键字大小写
     7. 括号不匹配
     8. anyOf/oneOf/allOf 结构错误
+    9. enum 值缺少引号
     """
     if not s:
         return s
     
     # 步骤1: 替换中文标点
     s = fix_chinese_punctuation(s)
+    
+    # 步骤1.5: 修复 enum 值缺少引号
+    s = fix_enum_values(s)
     
     # 步骤2: 修复 properties 闭合问题
     s = fix_properties_closure(s)
@@ -278,23 +342,22 @@ def fix_json_string(s: str) -> str:
     return s
 
 
-def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
+def normalize_quotes(text: str) -> str:
     """
-    提取从 start_pos 开始的平衡花括号内容
+    将文本中的单引号统一转换为双引号
+    小心处理转义字符，避免破坏字符串内容
     
     Args:
-        text: 要搜索的文本
-        start_pos: 开始位置
+        text: 要标准化的文本
         
     Returns:
-        平衡的花括号内容（包含外层花括号），如果没有找到则返回 None
+        引号标准化后的文本
     """
-    # 先将单引号统一转换为双引号，避免混合引号导致的解析问题
-    # 需要小心处理转义字符
     result = []
     in_string = False
     string_char = None
     i = 0
+    
     while i < len(text):
         c = text[i]
         
@@ -309,27 +372,47 @@ def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
                 result.append('"')  # 单引号转双引号
             else:
                 result.append(c)
+            i += 1
         else:
+            # 在字符串内部
             if c == '\\' and i + 1 < len(text):
-                # 转义字符
+                # 转义字符：保留转义序列
                 result.append(c)
                 result.append(text[i + 1])
                 i += 2
-                continue
             elif c == string_char:
+                # 字符串结束
                 in_string = False
                 string_char = None
                 result.append('"')  # 统一转为双引号
+                i += 1
             else:
                 result.append(c)
-        i += 1
+                i += 1
     
-    text = ''.join(result)
+    return ''.join(result)
+
+
+def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
+    """
+    提取从 start_pos 开始的平衡花括号内容
     
+    Args:
+        text: 要搜索的文本
+        start_pos: 开始位置
+        
+    Returns:
+        平衡的花括号内容（包含外层花括号），如果没有找到则返回 None
+    """
+    # 先将单引号统一转换为双引号，避免混合引号导致的解析问题
+    text = normalize_quotes(text)
+    
+    # 从start_pos开始查找第一个{
     brace_start = text.find('{', start_pos)
     if brace_start == -1:
         return None
     
+    # 跟踪花括号的嵌套深度
     count = 0
     in_string = False
     escape_next = False
@@ -345,19 +428,19 @@ def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
             escape_next = True
             continue
         
-        # 现在text已经标准化为双引号，只需要跟踪双引号
-        if c == '"' and not in_string:
-            in_string = True
-        elif c == '"' and in_string:
-            in_string = False
+        # 跟踪字符串状态（现在只需要处理双引号）
+        if c == '"':
+            in_string = not in_string
         elif not in_string:
             if c == '{':
                 count += 1
             elif c == '}':
                 count -= 1
                 if count == 0:
+                    # 找到匹配的闭合括号
                     return text[brace_start:i+1]
     
+    # 没有找到匹配的闭合括号
     return None
 
 
@@ -371,23 +454,47 @@ def parse_schema_string(schema_str: str) -> Optional[Dict]:
     Returns:
         解析后的字典，失败返回 None
     """
-    # 方法1: fix_json_string + json.loads
+    if not schema_str or not schema_str.strip():
+        return None
+    
+    # 预处理：移除首尾空白
+    schema_str = schema_str.strip()
+    
+    # 策略1: 先标准化引号，再使用fix_json_string + json.loads
+    try:
+        normalized = normalize_quotes(schema_str)
+        fixed = fix_json_string(normalized)
+        result = json.loads(fixed)
+        # 检查是否为空字典（可能是解析错误）
+        if result and isinstance(result, dict):
+            return result
+    except Exception as e:
+        pass
+    
+    # 策略2: ast.literal_eval（处理 Python dict 字面量）
+    try:
+        result = ast.literal_eval(schema_str)
+        if result and isinstance(result, dict):
+            return result
+    except Exception as e:
+        pass
+    
+    # 策略3: 简单替换后尝试
+    try:
+        simple = schema_str.replace('None', 'null').replace('True', 'true').replace('False', 'false')
+        simple = normalize_quotes(simple)
+        result = json.loads(simple)
+        if result and isinstance(result, dict):
+            return result
+    except Exception as e:
+        pass
+    
+    # 策略4: 使用fix_json_string但不标准化引号（处理已经是双引号的情况）
     try:
         fixed = fix_json_string(schema_str)
-        return json.loads(fixed)
-    except Exception as e:
-        pass
-    
-    # 方法2: ast.literal_eval（处理 Python dict 字面量）
-    try:
-        return ast.literal_eval(schema_str)
-    except Exception as e:
-        pass
-    
-    # 方法3: 简单替换后尝试
-    try:
-        simple = schema_str.replace('None', 'null').replace("'", '"')
-        return json.loads(simple)
+        result = json.loads(fixed)
+        if result and isinstance(result, dict):
+            return result
     except Exception as e:
         pass
     
@@ -455,7 +562,7 @@ def validate_schema(schema: Dict, schema_type: str, tool_name: str) -> List[str]
     return warnings
 
 
-def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
+def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True, debug: bool = False):
     """
     标准化 tool.txt 文件
     
@@ -463,6 +570,7 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
         input_path: 原始 tool.txt 路径
         output_path: 输出的标准化文件路径
         verbose: 是否打印详细信息
+        debug: 是否输出调试信息（包括原始文本片段）
         
     Returns:
         (成功标志, 解析错误列表)
@@ -477,6 +585,7 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
     parse_errors = []
     parse_warnings = []
     validation_warnings = []
+    debug_info = []  # 存储调试信息
     
     for block in tool_blocks:
         if not block.strip():
@@ -503,30 +612,61 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
         # 提取并解析 Parameters
         params_schema = None
         params_pos = block.find('Parameters:')
+        params_raw_text = ''  # 记录原始文本
         if params_pos != -1:
+            # 提取Parameters后的原始文本（用于调试）
+            params_line_end = block.find('\n', params_pos)
+            if params_line_end != -1:
+                params_raw_text = block[params_pos:params_line_end].strip()
+            else:
+                params_raw_text = block[params_pos:].strip()
+            
             params_str = extract_balanced_braces(block, params_pos)
             if params_str:
                 params_schema = parse_schema_string(params_str)
                 if params_schema is None:
                     parse_errors.append(f"工具 {tool_num} ({tool_name}) - Parameters 解析失败")
-                    if verbose:
-                        print(f"  原始 Parameters: {params_str[:100]}...")
+                    if debug:
+                        debug_info.append(f"工具 {tool_num} ({tool_name}) - Parameters 原始文本: {params_raw_text}")
+                        debug_info.append(f"  提取的内容: {params_str[:200]}...")
             else:
                 parse_warnings.append(f"工具 {tool_num} ({tool_name}) - Parameters 未找到花括号")
+                if debug:
+                    debug_info.append(f"工具 {tool_num} ({tool_name}) - Parameters 原始文本: {params_raw_text}")
         
         # 提取并解析 Output
         output_schema = None
         output_pos = block.find('Output:')
+        output_raw_text = ''  # 记录原始文本
         if output_pos != -1:
+            # 提取Output后的原始文本（用于调试）
+            output_line_end = block.find('\n', output_pos)
+            if output_line_end != -1:
+                output_raw_text = block[output_pos:output_line_end].strip()
+            else:
+                output_raw_text = block[output_pos:].strip()
+            
             output_str = extract_balanced_braces(block, output_pos)
             if output_str:
                 output_schema = parse_schema_string(output_str)
                 if output_schema is None:
                     parse_errors.append(f"工具 {tool_num} ({tool_name}) - Output 解析失败")
-                    if verbose:
-                        print(f"  原始 Output: {output_str[:100]}...")
+                    if debug:
+                        debug_info.append(f"工具 {tool_num} ({tool_name}) - Output 原始文本: {output_raw_text}")
+                        debug_info.append(f"  提取的内容: {output_str[:200]}...")
+                elif not output_schema or output_schema == {}:
+                    # 检测静默失败：解析成功但结果为空字典
+                    parse_warnings.append(f"工具 {tool_num} ({tool_name}) - Output 解析为空字典")
+                    if debug:
+                        debug_info.append(f"工具 {tool_num} ({tool_name}) - Output 原始文本: {output_raw_text}")
+                        debug_info.append(f"  提取的内容: {output_str[:200]}...")
             else:
                 parse_warnings.append(f"工具 {tool_num} ({tool_name}) - Output 未找到花括号")
+                if debug:
+                    debug_info.append(f"工具 {tool_num} ({tool_name}) - Output 原始文本: {output_raw_text}")
+                    # 输出Output:后面的内容供诊断
+                    snippet = output_raw_text[7:].strip()[:100]  # 跳过'Output:'
+                    debug_info.append(f"  Output: 后的内容: '{snippet}'")
         
         # 构建标准化的工具定义
         normalized_block = f"{tool_num}. Name: {tool_name}\n"
@@ -544,6 +684,15 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
             normalized_block += "Output: {}\n"
         
         normalized_tools.append(normalized_block)
+        
+        # 验证schema质量
+        if params_schema:
+            param_warnings = validate_schema(params_schema, 'Parameters', tool_name)
+            validation_warnings.extend(param_warnings)
+        
+        if output_schema:
+            output_warnings = validate_schema(output_schema, 'Output', tool_name)
+            validation_warnings.extend(output_warnings)
     
     # 写入标准化文件
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -559,16 +708,26 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
         print(f"处理工具数: {len(normalized_tools)}")
         
         if parse_warnings:
-            print(f"\n警告 ({len(parse_warnings)} 个):")
+            print(f"\n⚠ 警告 ({len(parse_warnings)} 个):")
             for warn in parse_warnings:
-                print(f"  ⚠ {warn}")
+                print(f"  {warn}")
+        
+        if validation_warnings:
+            print(f"\n⚠ 质量检查警告 ({len(validation_warnings)} 个):")
+            for warn in validation_warnings:
+                print(f"  {warn}")
         
         if parse_errors:
-            print(f"\n解析错误 ({len(parse_errors)} 个):")
+            print(f"\n✗ 解析错误 ({len(parse_errors)} 个):")
             for err in parse_errors:
-                print(f"  ✗ {err}")
+                print(f"  {err}")
         else:
             print("\n✓ 所有工具 schema 解析成功！")
+        
+        if debug and debug_info:
+            print(f"\n🔍 调试信息 ({len(debug_info)} 条):")
+            for info in debug_info:
+                print(f"  {info}")
         
         print("=" * 60)
         
@@ -586,7 +745,8 @@ if __name__ == "__main__":
     input_file = "/mnt/data/kw/ly/precision_index/tool.txt"
     output_file = "/mnt/data/kw/ly/precision_index/tool_normalized.txt"
     
-    success, errors = normalize_tool_txt(input_file, output_file, verbose=True)
+    # 设置 debug=True 可以看到详细的调试信息
+    success, errors = normalize_tool_txt(input_file, output_file, verbose=True, debug=True)
     
     if not success:
         print("\n需要手动修复以下问题后重新运行:")
