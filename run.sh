@@ -118,3 +118,6 @@ echo "  - metrics_summary.csv"
 echo ""
 echo "总耗时: ${MINUTES}分${SECONDS}秒"
 echo ""
+
+
+tmux new-session -s metrics "bash /Users/liaoying/Desktop/研一/llm/data_eval/precision_index/run_all_metrics.sh 2>&1 | tee /Users/liaoying/Desktop/研一/llm/data_eval/precision_index/run_metrics_log.txt"
