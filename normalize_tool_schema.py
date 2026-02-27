@@ -289,6 +289,43 @@ def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
     Returns:
         平衡的花括号内容（包含外层花括号），如果没有找到则返回 None
     """
+    # 先将单引号统一转换为双引号，避免混合引号导致的解析问题
+    # 需要小心处理转义字符
+    result = []
+    in_string = False
+    string_char = None
+    i = 0
+    while i < len(text):
+        c = text[i]
+        
+        if not in_string:
+            if c == '"':
+                in_string = True
+                string_char = '"'
+                result.append(c)
+            elif c == "'":
+                in_string = True
+                string_char = "'"
+                result.append('"')  # 单引号转双引号
+            else:
+                result.append(c)
+        else:
+            if c == '\\' and i + 1 < len(text):
+                # 转义字符
+                result.append(c)
+                result.append(text[i + 1])
+                i += 2
+                continue
+            elif c == string_char:
+                in_string = False
+                string_char = None
+                result.append('"')  # 统一转为双引号
+            else:
+                result.append(c)
+        i += 1
+    
+    text = ''.join(result)
+    
     brace_start = text.find('{', start_pos)
     if brace_start == -1:
         return None
@@ -308,9 +345,10 @@ def extract_balanced_braces(text: str, start_pos: int = 0) -> Optional[str]:
             escape_next = True
             continue
         
-        if c in ('"', "'") and not in_string:
-            in_string = c
-        elif c == in_string:
+        # 现在text已经标准化为双引号，只需要跟踪双引号
+        if c == '"' and not in_string:
+            in_string = True
+        elif c == '"' and in_string:
             in_string = False
         elif not in_string:
             if c == '{':
@@ -356,13 +394,14 @@ def parse_schema_string(schema_str: str) -> Optional[Dict]:
     return None
 
 
-def validate_schema_quality(schema: Dict, schema_type: str) -> List[str]:
+def validate_schema(schema: Dict, schema_type: str, tool_name: str) -> List[str]:
     """
-    验证 schema 质量，返回警告列表
+    验证 schema 的完整性和有效性
     
     Args:
-        schema: 要验证的 schema
-        schema_type: schema 类型（'Parameters' 或 'Output'）
+        schema: 要验证的 schema 字典
+        schema_type: 'Parameters' 或 'Output'
+        tool_name: 工具名
         
     Returns:
         警告信息列表
@@ -370,56 +409,48 @@ def validate_schema_quality(schema: Dict, schema_type: str) -> List[str]:
     warnings = []
     
     if not schema:
-        warnings.append(f"{schema_type} 为空")
+        warnings.append(f"工具 {tool_name} - {schema_type} 为空")
         return warnings
     
-    # 检查 Parameters schema
+    # 验证 Parameters schema
     if schema_type == 'Parameters':
         # 检查是否有 properties
         if 'properties' not in schema or not schema['properties']:
-            warnings.append(f"{schema_type} 缺少 properties 或 properties 为空")
+            warnings.append(f"工具 {tool_name} - Parameters 缺少 properties 定义")
         else:
             # 检查每个属性是否有 type 或 title
-            for prop_name, prop_schema in schema['properties'].items():
-                if not isinstance(prop_schema, dict):
-                    warnings.append(f"{schema_type}.properties.{prop_name} 不是对象")
+            for prop_name, prop_def in schema['properties'].items():
+                if not isinstance(prop_def, dict):
+                    warnings.append(f"工具 {tool_name} - Parameters.{prop_name} 定义不是对象")
                     continue
                 
-                if 'type' not in prop_schema and 'anyOf' not in prop_schema and 'oneOf' not in prop_schema:
-                    warnings.append(f"{schema_type}.properties.{prop_name} 缺少 type 定义")
+                if 'type' not in prop_def and 'anyOf' not in prop_def and 'oneOf' not in prop_def:
+                    warnings.append(f"工具 {tool_name} - Parameters.{prop_name} 缺少 type 定义")
                 
-                if 'title' not in prop_schema:
-                    warnings.append(f"{schema_type}.properties.{prop_name} 缺少 title")
+                if 'title' not in prop_def and 'description' not in prop_def:
+                    warnings.append(f"工具 {tool_name} - Parameters.{prop_name} 缺少 title/description")
         
-        # 检查是否有 type
+        # 检查是否有 type: object
         if 'type' not in schema:
-            warnings.append(f"{schema_type} 缺少顶层 type 定义")
-        
-        # 检查 required 字段
-        if 'required' in schema:
-            if not isinstance(schema['required'], list):
-                warnings.append(f"{schema_type}.required 应该是数组")
-            elif not schema['required']:
-                warnings.append(f"{schema_type}.required 为空数组")
+            warnings.append(f"工具 {tool_name} - Parameters 缺少顶层 type 定义")
+        elif schema['type'] != 'object':
+            warnings.append(f"工具 {tool_name} - Parameters type 应为 'object'，当前为 '{schema['type']}'")
     
-    # 检查 Output schema
+    # 验证 Output schema
     elif schema_type == 'Output':
         # 检查是否有 properties 或 type
         if 'properties' not in schema and 'type' not in schema:
-            warnings.append(f"{schema_type} 缺少 properties 或 type 定义")
+            warnings.append(f"工具 {tool_name} - Output 既无 properties 也无 type 定义")
         
-        # 如果有 properties，检查每个属性
+        # 如果有 properties，检查是否为空
         if 'properties' in schema:
             if not schema['properties']:
-                warnings.append(f"{schema_type}.properties 为空")
+                warnings.append(f"工具 {tool_name} - Output properties 为空")
             else:
-                for prop_name, prop_schema in schema['properties'].items():
-                    if not isinstance(prop_schema, dict):
-                        warnings.append(f"{schema_type}.properties.{prop_name} 不是对象")
-                        continue
-                    
-                    if 'type' not in prop_schema and 'anyOf' not in prop_schema:
-                        warnings.append(f"{schema_type}.properties.{prop_name} 缺少 type 定义")
+                # 检查每个输出字段是否有 type
+                for prop_name, prop_def in schema['properties'].items():
+                    if isinstance(prop_def, dict) and 'type' not in prop_def:
+                        warnings.append(f"工具 {tool_name} - Output.{prop_name} 缺少 type 定义")
     
     return warnings
 
@@ -445,7 +476,7 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
     normalized_tools = []
     parse_errors = []
     parse_warnings = []
-    quality_warnings = []
+    validation_warnings = []
     
     for block in tool_blocks:
         if not block.strip():
@@ -497,27 +528,6 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
             else:
                 parse_warnings.append(f"工具 {tool_num} ({tool_name}) - Output 未找到花括号")
         
-        # === 质量检测 ===
-        # 检查描述
-        if not description or description in ['xxx', 'XXX', 'TODO', '']:
-            quality_warnings.append(f"工具 {tool_num} ({tool_name}) - Description 为空或占位符")
-        
-        # 检查 Parameters schema 质量
-        if params_schema:
-            param_warnings = validate_schema_quality(params_schema, 'Parameters')
-            for warn in param_warnings:
-                quality_warnings.append(f"工具 {tool_num} ({tool_name}) - {warn}")
-        else:
-            quality_warnings.append(f"工具 {tool_num} ({tool_name}) - Parameters 为空")
-        
-        # 检查 Output schema 质量
-        if output_schema:
-            output_warnings = validate_schema_quality(output_schema, 'Output')
-            for warn in output_warnings:
-                quality_warnings.append(f"工具 {tool_num} ({tool_name}) - {warn}")
-        else:
-            quality_warnings.append(f"工具 {tool_num} ({tool_name}) - Output 为空")
-        
         # 构建标准化的工具定义
         normalized_block = f"{tool_num}. Name: {tool_name}\n"
         normalized_block += f"Description: {description}\n"
@@ -549,42 +559,16 @@ def normalize_tool_txt(input_path: str, output_path: str, verbose: bool = True):
         print(f"处理工具数: {len(normalized_tools)}")
         
         if parse_warnings:
-            print(f"\n⚠ 解析警告 ({len(parse_warnings)} 个):")
+            print(f"\n警告 ({len(parse_warnings)} 个):")
             for warn in parse_warnings:
-                print(f"  • {warn}")
+                print(f"  ⚠ {warn}")
         
         if parse_errors:
-            print(f"\n✗ 解析错误 ({len(parse_errors)} 个):")
+            print(f"\n解析错误 ({len(parse_errors)} 个):")
             for err in parse_errors:
-                print(f"  • {err}")
+                print(f"  ✗ {err}")
         else:
             print("\n✓ 所有工具 schema 解析成功！")
-        
-        # 打印质量检测结果
-        if quality_warnings:
-            print(f"\n⚠ 质量检测警告 ({len(quality_warnings)} 个):")
-            print("  以下问题不影响 JSON 解析，但可能影响 schema 的完整性和可用性：")
-            
-            # 按工具分组显示
-            warnings_by_tool = {}
-            for warn in quality_warnings:
-                # 提取工具编号
-                match = re.match(r'工具 (\d+) \(([^)]+)\) - (.+)', warn)
-                if match:
-                    tool_num = match.group(1)
-                    tool_name = match.group(2)
-                    warning_msg = match.group(3)
-                    key = f"工具 {tool_num} ({tool_name})"
-                    if key not in warnings_by_tool:
-                        warnings_by_tool[key] = []
-                    warnings_by_tool[key].append(warning_msg)
-            
-            for tool_key, warnings in warnings_by_tool.items():
-                print(f"\n  {tool_key}:")
-                for w in warnings:
-                    print(f"    - {w}")
-        else:
-            print("\n✓ 所有工具 schema 质量检测通过！")
         
         print("=" * 60)
         
