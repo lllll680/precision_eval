@@ -374,14 +374,20 @@ def collect_params_to_verify(
                         future_obs_values = build_future_observation_values(response, step_index)
                         current_cot = get_current_cot(response, step_index)
                         
-                        query_checked_params = checked_params_map.get(step_key, [])
-                        
-                        for coa_item in coa_list:
+                        for coa_idx, coa_item in enumerate(coa_list):
                             if 'action' not in coa_item:
                                 continue
                             
                             action = coa_item['action']
-                            args = action.get('arguments', {})
+                            tool_name = action.get('name', '')
+                            args = action.get('args', {})
+                            
+                            if not args or not isinstance(args, dict):
+                                continue
+                            
+                            # 获取 query_param_accuracy 已检查的参数名列表
+                            checked_key = (step_key, coa_idx, tool_name)
+                            query_checked_params = checked_params_map.get(checked_key, [])
                             
                             for param_name, param_value in args.items():
                                 if param_value is None or str(param_value).strip() == '':
@@ -406,7 +412,8 @@ def collect_params_to_verify(
                                     step_key,
                                     param_name,
                                     step_index,
-                                    future_obs_values
+                                    future_obs_values,
+                                    tool_name  # 添加tool_name以便后续记录
                                 ))
                 
                 metadata['file_info'][file_path_str] = {
@@ -501,7 +508,7 @@ def calculate_obs_param_accuracy(
         file_error_details = []
         
         for param_idx in file_info['params_indices']:
-            param_str, history_obs, cot, _, step_key, param_name, step_index, future_obs = params_to_verify[param_idx]
+            param_str, history_obs, cot, _, step_key, param_name, step_index, future_obs, tool_name = params_to_verify[param_idx]
             verified = verification_results[param_idx]
             
             file_total_params += 1
@@ -528,7 +535,8 @@ def calculate_obs_param_accuracy(
                     'param_name': param_name,
                     'param_value': param_str,
                     'error_type': error_type,
-                    'reason': reason
+                    'reason': reason,
+                    'tool_name': tool_name
                 })
         
         file_accuracy = file_correct_params / file_total_params if file_total_params > 0 else 0.0
