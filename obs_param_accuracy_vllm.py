@@ -280,10 +280,22 @@ def load_query_param_results(query_result_path: str) -> Dict:
     file_map = {}
     for file_result in result.get('per_file_results', []):
         file_path = file_result['file']
+        
+        # 构建已检查参数映射: (step, coa_index, tool_name) -> checked_params
+        checked_params_map = {}
+        for step_detail in file_result.get('per_step_details', []):
+            step = step_detail.get('step', '')
+            coa_index = step_detail.get('coa_index', 0)
+            tool_name = step_detail.get('tool_name', '')
+            checked_params = step_detail.get('checked_params', [])
+            
+            key = (step, coa_index, tool_name)
+            checked_params_map[key] = checked_params
+        
         file_map[file_path] = {
             'extracted_entities': file_result.get('extracted_entities', []),
             'query': file_result.get('query', ''),
-            'checked_params_map': file_result.get('checked_params_map', {})
+            'checked_params_map': checked_params_map
         }
     
     return file_map
