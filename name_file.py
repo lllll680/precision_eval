@@ -21,7 +21,13 @@ from typing import List
 
 def rename_json_files_in_folder(folder_path: str, dry_run: bool = True):
     """
-    重命名指定文件夹中的JSON文件
+    重命名指定文件夹中的JSON文件（两阶段重命名策略）
+    
+    策略说明：
+    1. 第一阶段：将所有文件重命名为临时名称（temp_001.json, temp_002.json, ...）
+    2. 第二阶段：将临时文件重命名为最终名称（run_001.json, run_002.json, ...）
+    
+    这样可以避免文件名冲突导致的编号不连续问题
     
     Args:
         folder_path: 文件夹路径
@@ -50,37 +56,55 @@ def rename_json_files_in_folder(folder_path: str, dry_run: bool = True):
         return
     
     print(f"\n找到 {len(json_files)} 个JSON文件需要重命名")
+    print(f"使用两阶段重命名策略避免文件名冲突\n")
     
-    # 重命名文件
-    rename_count = 0
+    # 第一阶段：重命名为临时文件名
+    print("[阶段1] 重命名为临时文件名...")
+    temp_files = []
+    stage1_count = 0
+    
     for idx, old_file in enumerate(json_files, start=1):
-        new_name = f"run_{idx:03d}.json"  # run_001.json, run_002.json, ...
-        new_path = folder / new_name
-        
-        # 如果新文件名已存在且不是当前文件，跳过
-        if new_path.exists() and new_path != old_file:
-            print(f"⚠️  目标文件已存在，跳过: {old_file.name} -> {new_name}")
-            continue
-        
-        # 如果文件名已经是目标名称，跳过
-        if old_file.name == new_name:
-            print(f"✅ 已是目标名称，跳过: {new_name}")
-            continue
+        temp_name = f"temp_{idx:03d}.json"
+        temp_path = folder / temp_name
         
         if dry_run:
-            print(f"🔍 [试运行] {old_file.name} -> {new_name}")
+            print(f"  🔍 [试运行] {old_file.name} -> {temp_name}")
+            temp_files.append((temp_path, idx))
         else:
             try:
-                old_file.rename(new_path)
-                print(f"✅ 重命名成功: {old_file.name} -> {new_name}")
-                rename_count += 1
+                old_file.rename(temp_path)
+                temp_files.append((temp_path, idx))
+                stage1_count += 1
             except Exception as e:
-                print(f"❌ 重命名失败: {old_file.name} -> {new_name}, 错误: {e}")
+                print(f"  ❌ 重命名失败: {old_file.name} -> {temp_name}, 错误: {e}")
+    
+    if not dry_run:
+        print(f"  ✅ 阶段1完成，成功重命名 {stage1_count} 个文件\n")
+    else:
+        print(f"  [试运行] 阶段1将重命名 {len(temp_files)} 个文件\n")
+    
+    # 第二阶段：重命名为最终文件名
+    print("[阶段2] 重命名为最终文件名...")
+    stage2_count = 0
+    
+    for temp_path, idx in temp_files:
+        final_name = f"run_{idx:03d}.json"
+        final_path = folder / final_name
+        
+        if dry_run:
+            print(f"  🔍 [试运行] {temp_path.name} -> {final_name}")
+        else:
+            try:
+                temp_path.rename(final_path)
+                print(f"  ✅ {temp_path.name} -> {final_name}")
+                stage2_count += 1
+            except Exception as e:
+                print(f"  ❌ 重命名失败: {temp_path.name} -> {final_name}, 错误: {e}")
     
     if dry_run:
         print(f"\n[试运行模式] 将重命名 {len(json_files)} 个文件")
     else:
-        print(f"\n✅ 成功重命名 {rename_count} 个文件")
+        print(f"\n✅ 成功重命名 {stage2_count} 个文件")
 
 
 def batch_rename_folders(folder_paths: List[str], dry_run: bool = True):
@@ -113,7 +137,7 @@ if __name__ == "__main__":
     # 配置要处理的文件夹列表
     folders = [
         "/Users/liaoying/Desktop/研一/llm/data_eval/precision_index/data1",
-        "/Users/liaoying/Desktop/研一/llm/data_eval/precision_index/data2",
+        #"/Users/liaoying/Desktop/研一/llm/data_eval/precision_index/data2",
         # 添加更多文件夹...
     ]
     
