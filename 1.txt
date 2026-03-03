@@ -1,1 +1,2 @@
 \mathcal{T} = {(cot_t, action_t, obs_t)}_{t=1}^{T}
+Acc_{tool} = \frac{N_{valid_tool}}{N_{call}}
